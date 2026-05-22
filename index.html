@@ -1,0 +1,665 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>千卷 · AI 网文写作工作台</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="作品导航">
+        <div class="brand-block">
+          <div class="brand-mark">千</div>
+          <div>
+            <div class="brand-name">千卷</div>
+            <div class="brand-meta">AI 网文写作工作台</div>
+          </div>
+        </div>
+
+        <div class="project-switcher">
+          <div class="project-label">当前作品</div>
+          <button class="project-button" type="button" id="projectShelfBtn" title="打开我的书架">
+            <span>加载当前作品</span>
+            <span class="chevron">⌄</span>
+          </button>
+          <button class="idea-project-button" type="button" id="ideaProjectBtn">只输入题材自动生成</button>
+          <button class="new-project-button" type="button" id="newProjectBtn">手动新建</button>
+        </div>
+
+        <nav class="main-nav">
+          <button class="nav-item active" type="button" data-view="workspace" title="章节工作台">
+            <span class="nav-icon">W</span>
+            <span>章节工作台</span>
+          </button>
+          <button class="nav-item" type="button" data-view="book" title="作品总览">
+            <span class="nav-icon">B</span>
+            <span>作品总览</span>
+          </button>
+          <button class="nav-item" type="button" data-view="truth" title="真相文件">
+            <span class="nav-icon">T</span>
+            <span>真相文件</span>
+          </button>
+          <button class="nav-item" type="button" data-view="hooks" title="伏笔看板">
+            <span class="nav-icon">H</span>
+            <span>伏笔看板</span>
+          </button>
+          <button class="nav-item" type="button" data-view="characters" title="角色关系">
+            <span class="nav-icon">C</span>
+            <span>角色关系</span>
+          </button>
+          <button class="nav-item" type="button" data-view="audit" title="审计中心">
+            <span class="nav-icon">A</span>
+            <span>审计中心</span>
+          </button>
+          <button class="nav-item" type="button" data-view="trace" title="运行记录">
+            <span class="nav-icon">R</span>
+            <span>运行记录</span>
+          </button>
+          <button class="nav-item" type="button" data-view="models" title="模型配置">
+            <span class="nav-icon">M</span>
+            <span>模型配置</span>
+          </button>
+        </nav>
+
+        <div class="chapter-list">
+          <div class="section-kicker">章节</div>
+          <button class="chapter-row active" type="button">
+            <span>001</span>
+            <span>加载中</span>
+          </button>
+        </div>
+      </aside>
+
+      <div class="main-shell">
+        <header class="topbar">
+          <div>
+            <div class="eyebrow">正在加载工作流</div>
+            <h1>正在加载作品</h1>
+          </div>
+          <div class="top-actions">
+            <button class="secondary-button" type="button" id="exportBtn">导出正文</button>
+            <button class="secondary-button" type="button" id="exportBookBtn">导出全书</button>
+            <button class="primary-button" type="button" id="runWorkflowBtn">下一步</button>
+          </div>
+        </header>
+
+        <main class="content-grid">
+          <section class="view-panel is-visible" id="view-workspace" aria-label="章节工作台">
+            <div class="workspace-layout">
+              <section class="center-column">
+                <section class="quick-start-panel" aria-labelledby="quickStartTitle">
+                  <div class="quick-copy">
+                    <div class="eyebrow">新用户入口</div>
+                    <h2 id="quickStartTitle">想写一本新书，从题材开始</h2>
+                    <p>只输入一个题材或脑洞，系统会自动给出书名、主角、大纲、前 10 章细纲和第一章场景。</p>
+                    <div class="model-status" id="quickModelStatus">正在检测大模型...</div>
+                  </div>
+                  <div class="quick-start-form">
+                    <textarea id="quickTopicInput" rows="3" placeholder="例：全民御兽时代，主角契约一颗没人要的废蛋"></textarea>
+                    <label class="quick-length-field">
+                      <span>篇幅</span>
+                      <select id="quickStoryLength">
+                        <option value="long" selected>长篇连载 · 约100万字</option>
+                        <option value="medium">中篇小说 · 约20万字</option>
+                        <option value="short">短篇小说 · 约5万字</option>
+                      </select>
+                    </label>
+                    <div class="quick-actions">
+                      <button class="primary-button" type="button" id="quickIdeaBtn">自动生成书案</button>
+                      <button class="secondary-button" type="button" id="quickManualBtn">手动填写</button>
+                    </div>
+                    <div class="quick-current">
+                      <span id="quickCurrentTitle">当前作品加载中</span>
+                      <span id="quickCurrentStep">下一步加载中</span>
+                    </div>
+                  </div>
+                </section>
+
+                <div class="status-strip">
+                  <div class="status-tile">
+                    <span class="tile-label">当前建议</span>
+                    <strong id="directorDecision">加载中</strong>
+                  </div>
+                  <div class="status-tile">
+                    <span class="tile-label">当前单元</span>
+                    <strong>加载中</strong>
+                  </div>
+                  <div class="status-tile">
+                    <span class="tile-label">草稿评分</span>
+                    <strong id="draftScore">-- / 100</strong>
+                  </div>
+                </div>
+
+                <section class="workflow-panel">
+                  <div class="workflow-copy">
+                    <div class="eyebrow">推荐流程</div>
+                    <h2 id="workflowNextTitle">下一步</h2>
+                    <p id="workflowHelper">系统会根据当前状态推荐下一步。</p>
+                  </div>
+                  <div class="workflow-actions">
+                    <div class="workflow-steps" id="workflowSteps"></div>
+                    <div class="workflow-button-row">
+                      <button class="secondary-button" type="button" id="workflowAutoBtn">自动写完本章</button>
+                      <button class="primary-button" type="button" id="workflowPrimaryBtn">继续</button>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="finish-panel" id="finishPanel" hidden>
+                  <div>
+                    <div class="eyebrow">本章完成</div>
+                    <h2>本章已经可以交稿</h2>
+                    <p>建议先导出正文保存，再回到“只输入题材自动生成”开一本新书，或者继续打磨当前章节。</p>
+                  </div>
+                  <div class="finish-actions">
+                    <button class="primary-button" type="button" id="finishExportBtn">导出本章</button>
+                    <button class="secondary-button" type="button" id="finishNextChapterBtn">继续写下一章</button>
+                    <button class="secondary-button" type="button" id="finishNewIdeaBtn">再开一本新书</button>
+                  </div>
+                </section>
+
+                <section class="panel">
+                  <div class="panel-header">
+                    <div>
+                      <h2>本章计划</h2>
+                      <p>生成计划后，这里会显示本章写作目标和边界。</p>
+                    </div>
+                    <div class="button-group">
+                      <button class="ghost-button" type="button" id="planBtn">生成计划</button>
+                      <button class="ghost-button" type="button" id="lockPlanBtn">锁定计划</button>
+                    </div>
+                  </div>
+                  <div class="plan-grid">
+                    <div class="plan-block">
+                      <span>读者承诺</span>
+                      <strong>等待生成</strong>
+                    </div>
+                    <div class="plan-block">
+                      <span>必须推进</span>
+                      <strong>等待生成</strong>
+                    </div>
+                    <div class="plan-block">
+                      <span>禁止提前解决</span>
+                      <strong>等待生成</strong>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="panel">
+                  <div class="panel-header compact">
+                    <div>
+                      <h2>场景卡</h2>
+                      <p>点击场景卡查看入场状态、必写事件和退出状态。</p>
+                    </div>
+                    <button class="ghost-button" type="button" id="writeScenesBtn">分场景生成</button>
+                  </div>
+                  <div class="scene-board" id="sceneBoard"></div>
+                </section>
+
+                <section class="panel editor-panel">
+                  <div class="panel-header compact">
+                    <div>
+                      <h2>章节正文</h2>
+                      <p id="editorMeta">scene_03 · 装逼打脸 · 620 字</p>
+                    </div>
+                    <div class="button-group">
+                      <button class="ghost-button" type="button" id="saveSceneBtn">保存修改</button>
+                      <button class="ghost-button" type="button" id="reviseSceneBtn">局部修订</button>
+                      <button class="ghost-button" type="button" id="auditBtn">审计当前章</button>
+                      <button class="ghost-button" type="button" id="styleEditBtn">原创表达审校</button>
+                    </div>
+                  </div>
+                  <article class="chapter-editor" id="chapterEditor" contenteditable="true" spellcheck="false"></article>
+                </section>
+              </section>
+
+              <aside class="right-rail" aria-label="Director 面板">
+                <section class="rail-panel">
+                  <div class="rail-title">写作总控</div>
+                  <div class="director-stack">
+                    <div class="agent-step done">
+                      <span>Story Architect</span>
+                      <strong>单元目标已匹配</strong>
+                    </div>
+                    <div class="agent-step done">
+                      <span>Chapter Planner</span>
+                      <strong>5 个 Beat 已生成</strong>
+                    </div>
+                    <div class="agent-step active">
+                      <span>Scene Writer</span>
+                      <strong>scene_03 等待修订</strong>
+                    </div>
+                    <div class="agent-step pending">
+                      <span>Canon Settler</span>
+                      <strong>待确认 TruthPatch</strong>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="rail-panel">
+                  <div class="rail-title">真相更新预览</div>
+                  <div class="patch-list" id="patchList"></div>
+                  <button class="primary-button full" type="button" id="settleBtn">确认写入真相文件</button>
+                </section>
+
+                <section class="rail-panel">
+                  <div class="rail-title">问题提醒</div>
+                  <div class="issue-list mini">
+                    <div class="issue-row warning">
+                      <strong>状态冲突</strong>
+                      <span>陈玄右臂有伤，不能双手持剑。</span>
+                    </div>
+                    <div class="issue-row">
+                      <strong>钩子重复</strong>
+                      <span>上一章已用强敌出场，本章建议改为物品异动。</span>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="rail-panel">
+                  <div class="rail-title">原创表达审校</div>
+                  <div class="style-report" id="styleReport"></div>
+                </section>
+              </aside>
+            </div>
+          </section>
+
+          <section class="view-panel" id="view-book" aria-label="作品总览">
+            <div class="page-head">
+              <div>
+                <h2>作品总览</h2>
+                <p>查看当前作品进度、已归档章节和后续细纲。</p>
+              </div>
+              <div class="button-group">
+                <button class="secondary-button" type="button" id="bookExportBtn">导出全书</button>
+                <button class="primary-button" type="button" id="bookContinueBtn">回到当前章节</button>
+              </div>
+            </div>
+            <div class="book-layout">
+              <section class="panel">
+                <div class="book-summary" id="bookSummary"></div>
+              </section>
+              <section class="panel">
+                <div class="panel-header compact">
+                  <div>
+                    <h2>已完成章节</h2>
+                    <p>归档后的章节可以随时导出，不会被后续写作覆盖。</p>
+                  </div>
+                </div>
+                <div class="archive-list" id="archiveList"></div>
+              </section>
+              <section class="panel">
+                <div class="panel-header compact">
+                  <div>
+                    <h2>后续细纲</h2>
+                    <p>根据题材成书生成的前 10 章推进路线。</p>
+                  </div>
+                </div>
+                <div class="outline-mini-list" id="bookOutlineList"></div>
+              </section>
+            </div>
+          </section>
+
+          <section class="view-panel" id="view-truth" aria-label="真相文件">
+            <div class="page-head">
+              <div>
+                <h2>三层记忆系统</h2>
+                <p>把已经发生的事实、当前状态和未来创作意图区分开，防止真相文件污染。</p>
+              </div>
+              <div class="segmented" role="tablist">
+                <button class="segment active" type="button" data-memory="canon">Canon Truth</button>
+                <button class="segment" type="button" data-memory="state">Current State</button>
+                <button class="segment" type="button" data-memory="intent">Creative Intent</button>
+              </div>
+            </div>
+            <div class="memory-grid" id="memoryGrid"></div>
+          </section>
+
+          <section class="view-panel" id="view-hooks" aria-label="伏笔看板">
+            <div class="page-head">
+              <div>
+                <h2>伏笔看板</h2>
+                <p>伏笔从计划、埋设、强化、临近回收到解决，每个状态都可追踪。</p>
+              </div>
+              <button class="ghost-button" type="button" id="advanceHookBtn">推进一个伏笔</button>
+            </div>
+            <div class="kanban" id="hookBoard"></div>
+          </section>
+
+          <section class="view-panel" id="view-characters" aria-label="角色关系">
+            <div class="page-head">
+              <div>
+                <h2>角色关系图</h2>
+                <p>点击角色查看当前状态、能力边界、最近动作和不可违反约束。</p>
+              </div>
+            </div>
+            <div class="character-layout">
+              <section class="relation-map" id="relationMap"></section>
+              <aside class="character-side">
+                <div class="character-detail" id="characterDetail"></div>
+                <div class="relationship-list" id="relationshipList"></div>
+              </aside>
+            </div>
+          </section>
+
+          <section class="view-panel" id="view-models" aria-label="模型配置">
+            <div class="page-head">
+              <div>
+                <h2>模型配置</h2>
+                <p>填写 OpenAI 兼容接口，按 Agent 分配不同模型。API Key 只保存在当前本地后端进程内。</p>
+              </div>
+              <button class="primary-button" type="button" id="testLLMConfigBtn">测试连接</button>
+            </div>
+            <section class="panel">
+              <form class="model-form" id="llmConfigForm">
+                <div class="form-grid">
+                  <label>
+                    <span>默认 API Key</span>
+                    <input name="apiKey" type="password" autocomplete="off" placeholder="不填写则沿用当前环境变量" />
+                  </label>
+                  <label>
+                    <span>默认调用地址</span>
+                    <input name="baseUrl" type="url" placeholder="https://api.openai.com/v1" />
+                  </label>
+                  <label>
+                    <span>默认模型</span>
+                    <input name="model" type="text" placeholder="gpt-5.5" />
+                  </label>
+                </div>
+                <div class="model-status-card" id="llmConfigStatus">正在读取模型配置...</div>
+                <div class="agent-model-list" id="agentModelList"></div>
+                <div class="modal-actions">
+                  <label class="test-agent-field">
+                    <span>测试 Agent</span>
+                    <select id="testAgentRole"></select>
+                  </label>
+                  <button class="primary-button" type="submit">保存模型配置</button>
+                </div>
+              </form>
+            </section>
+          </section>
+
+          <section class="view-panel" id="view-audit" aria-label="审计中心">
+            <div class="page-head">
+              <div>
+                <h2>Audit Board</h2>
+                <p>连续性、读者体验、风格语言分开审计，由 Director 合并成可执行修订意见。</p>
+              </div>
+              <button class="primary-button" type="button" id="rerunAuditBtn">重新审计</button>
+            </div>
+            <div class="audit-layout">
+              <section class="score-matrix" id="scoreMatrix"></section>
+              <section class="panel">
+                <div class="panel-header compact">
+                  <div>
+                    <h2>Gate Report</h2>
+                    <p>建议动作：局部修订，不需要整章重写。</p>
+                  </div>
+                </div>
+                <div class="issue-list" id="auditIssues"></div>
+              </section>
+            </div>
+          </section>
+
+          <section class="view-panel" id="view-trace" aria-label="运行记录">
+            <div class="page-head">
+              <div>
+                <h2>Run Trace</h2>
+                <p>记录工作流、Prompt 版本、内容包哈希和真相文件版本，方便回放和回滚。</p>
+              </div>
+            </div>
+            <div class="trace-layout">
+              <section class="panel">
+                <div class="timeline" id="runTrace"></div>
+              </section>
+              <section class="panel">
+                <div class="panel-header compact">
+                  <div>
+                    <h2>版本信息</h2>
+                    <p>本次运行的关键版本与校验信息。</p>
+                  </div>
+                </div>
+                <div class="version-table">
+                  <div><span>workflow</span><strong>novel_workflow_v1</strong></div>
+                  <div><span>planner prompt</span><strong>planner_v3</strong></div>
+                  <div><span>scene writer</span><strong>scene_writer_v2</strong></div>
+                  <div><span>truth before</span><strong>v11</strong></div>
+                  <div><span>truth after</span><strong id="truthAfter">v12 pending</strong></div>
+                  <div><span>content pack</span><strong>sha256: 5d31...a9f0</strong></div>
+                </div>
+              </section>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <div class="modal-backdrop" id="newProjectModal" aria-hidden="true">
+      <section class="modal" role="dialog" aria-modal="true" aria-labelledby="newProjectTitle">
+        <div class="modal-header">
+          <div>
+            <div class="eyebrow">新用户从这里开始</div>
+            <h2 id="newProjectTitle">手动创建新书</h2>
+          </div>
+          <button class="icon-button" type="button" id="closeProjectModal" title="关闭">×</button>
+        </div>
+
+        <form class="project-form" id="newProjectForm">
+          <label>
+            <span>书名</span>
+            <input name="title" type="text" placeholder="例：全民御兽：废蛋开局" required />
+          </label>
+
+          <div class="form-grid">
+            <label>
+              <span>流派</span>
+              <select name="genre">
+                <option value="xuanhuan">玄幻修仙</option>
+                <option value="urban">都市系统</option>
+                <option value="rebirth">重生穿越</option>
+                <option value="romance">女频言情</option>
+                <option value="scifi">科幻末世</option>
+                <option value="weird_rules">规则怪谈/诡异复苏</option>
+                <option value="beast_taming">御兽</option>
+                <option value="infinite">无限流/副本</option>
+                <option value="gaowu">高武/灵气复苏</option>
+                <option value="apocalypse">末世囤货/天灾</option>
+                <option value="game_invasion">游戏入侵/第四天灾</option>
+                <option value="live_entertainment">直播文娱</option>
+                <option value="farming_building">种田基建/经营</option>
+                <option value="mystery_horror">克苏鲁/民俗悬疑</option>
+              </select>
+            </label>
+            <label>
+              <span>目标平台</span>
+              <select name="platform">
+                <option value="fanqie">番茄小说</option>
+                <option value="qidian">起点中文网</option>
+                <option value="jjwxc">晋江文学城</option>
+                <option value="qimao">七猫小说</option>
+              </select>
+            </label>
+            <label>
+              <span>篇幅/目标字数</span>
+              <select name="storyLength">
+                <option value="long" selected>长篇连载 · 约100万字 / 400章</option>
+                <option value="medium">中篇小说 · 约20万字 / 80章</option>
+                <option value="short">短篇小说 · 约5万字 / 12章</option>
+              </select>
+            </label>
+          </div>
+
+          <label>
+            <span>主角名</span>
+            <input name="protagonist" type="text" placeholder="例：林澈" required />
+          </label>
+
+          <label>
+            <span>一句话设定</span>
+            <textarea name="premise" rows="3" placeholder="例：贫民少年契约没人要的废蛋，却能看到隐藏神话进化路线。"></textarea>
+          </label>
+
+          <label>
+            <span>第一章目标</span>
+            <textarea name="firstGoal" rows="3" placeholder="例：写出契约失败压力、废蛋登场和第一次反转，章末留下三天倒计时。"></textarea>
+          </label>
+
+          <div class="modal-actions">
+            <button class="secondary-button" type="button" id="cancelProjectCreate">取消</button>
+            <button class="primary-button" type="submit">创建并进入工作台</button>
+          </div>
+        </form>
+      </section>
+    </div>
+
+    <div class="modal-backdrop" id="ideaProjectModal" aria-hidden="true">
+      <section class="modal wide-modal" role="dialog" aria-modal="true" aria-labelledby="ideaProjectTitle">
+        <div class="modal-header">
+          <div>
+            <div class="eyebrow">只需要一个题材</div>
+            <h2 id="ideaProjectTitle">题材成书生成器</h2>
+          </div>
+          <button class="icon-button" type="button" id="closeIdeaModal" title="关闭">×</button>
+        </div>
+
+        <form class="project-form" id="ideaForm">
+          <label>
+            <span>你的题材/脑洞</span>
+            <textarea name="topic" rows="4" placeholder="例：夜班外卖员捡到一个能改写订单命运的旧符灯" required></textarea>
+          </label>
+          <div class="form-grid">
+            <label>
+              <span>流派判断</span>
+              <select name="genre">
+                <option value="auto">自动判断</option>
+                <option value="xuanhuan">玄幻修仙</option>
+                <option value="urban">都市系统</option>
+                <option value="rebirth">重生穿越</option>
+                <option value="romance">女频言情</option>
+                <option value="scifi">科幻末世</option>
+                <option value="weird_rules">规则怪谈/诡异复苏</option>
+                <option value="beast_taming">御兽</option>
+                <option value="infinite">无限流/副本</option>
+                <option value="gaowu">高武/灵气复苏</option>
+                <option value="apocalypse">末世囤货/天灾</option>
+                <option value="game_invasion">游戏入侵/第四天灾</option>
+                <option value="live_entertainment">直播文娱</option>
+                <option value="farming_building">种田基建/经营</option>
+                <option value="mystery_horror">克苏鲁/民俗悬疑</option>
+              </select>
+            </label>
+            <label>
+              <span>目标平台</span>
+              <select name="platform">
+                <option value="fanqie">番茄小说</option>
+                <option value="qidian">起点中文网</option>
+                <option value="jjwxc">晋江文学城</option>
+                <option value="qimao">七猫小说</option>
+              </select>
+            </label>
+            <label>
+              <span>篇幅/目标字数</span>
+              <select name="storyLength">
+                <option value="long" selected>长篇连载 · 约100万字 / 400章</option>
+                <option value="medium">中篇小说 · 约20万字 / 80章</option>
+                <option value="short">短篇小说 · 约5万字 / 12章</option>
+              </select>
+            </label>
+          </div>
+          <div class="modal-actions">
+            <button class="secondary-button" type="button" id="cancelIdeaCreate">取消</button>
+            <button class="primary-button" type="submit">生成书名、大纲和细纲</button>
+          </div>
+        </form>
+
+        <section class="idea-result" id="ideaResult" hidden>
+          <div class="idea-result-header">
+            <div>
+              <h3 id="ideaTitle">推荐书案</h3>
+              <p id="ideaPremise"></p>
+            </div>
+            <button class="primary-button" type="button" id="adoptIdeaBtn">采用方案创建作品</button>
+          </div>
+          <div class="idea-grid">
+            <div class="idea-box">
+              <span>推荐书名</span>
+              <div id="ideaTitles"></div>
+            </div>
+            <div class="idea-box">
+              <span>主角名</span>
+              <div id="ideaHeroes"></div>
+            </div>
+            <div class="idea-box wide">
+              <span>篇幅规划</span>
+              <p id="ideaLength"></p>
+            </div>
+            <div class="idea-box wide">
+              <span>简介候选</span>
+              <div class="synopsis-choice-list" id="ideaSynopsisOptions"></div>
+            </div>
+            <div class="idea-box wide">
+              <span>核心卖点</span>
+              <p id="ideaSellingPoint"></p>
+            </div>
+            <div class="idea-box wide">
+              <span>世界观</span>
+              <p id="ideaWorld"></p>
+            </div>
+            <div class="idea-box wide">
+              <span>题材爆款配置</span>
+              <div class="genre-rule-grid" id="ideaDeepRules"></div>
+            </div>
+          </div>
+          <div class="outline-layout">
+            <div>
+              <h3>大纲</h3>
+              <div class="outline-list" id="ideaArcs"></div>
+            </div>
+            <div>
+              <h3>前 10 章细纲</h3>
+              <div class="chapter-outline-list" id="ideaChapters"></div>
+            </div>
+          </div>
+        </section>
+      </section>
+    </div>
+
+    <div class="modal-backdrop" id="projectShelfModal" aria-hidden="true">
+      <section class="modal wide-modal" role="dialog" aria-modal="true" aria-labelledby="projectShelfTitle">
+        <div class="modal-header">
+          <div>
+            <div class="eyebrow">我的书架</div>
+            <h2 id="projectShelfTitle">选择要继续写的作品</h2>
+          </div>
+          <button class="icon-button" type="button" id="closeProjectShelfModal" title="关闭">×</button>
+        </div>
+        <div class="project-shelf-list" id="projectShelfList"></div>
+        <div class="modal-actions">
+          <button class="secondary-button" type="button" id="shelfManualBtn">手动新建</button>
+          <button class="primary-button" type="button" id="shelfNewIdeaBtn">输入题材开新书</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="modal-backdrop" id="chapterReaderModal" aria-hidden="true">
+      <section class="modal reader-modal" role="dialog" aria-modal="true" aria-labelledby="chapterReaderTitle">
+        <div class="modal-header">
+          <div>
+            <div class="eyebrow">章节正文</div>
+            <h2 id="chapterReaderTitle">归档章节</h2>
+            <p id="chapterReaderMeta"></p>
+          </div>
+          <button class="icon-button" type="button" id="closeChapterReaderModal" title="关闭">×</button>
+        </div>
+        <div class="reader-actions">
+          <button class="secondary-button" type="button" id="readerExportBtn">导出本章</button>
+        </div>
+        <article class="reader-content" id="chapterReaderContent"></article>
+      </section>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="./app.js"></script>
+  </body>
+</html>

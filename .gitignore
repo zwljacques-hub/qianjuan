@@ -1,0 +1,34 @@
+# ============ 运行时产物 ============
+backend/data/users/
+backend/data/projects/
+backend/data/project_state.json
+backend/data/*.json
+backend/data/*.json.bak.*
+backend/data/*.before-gpt-test.*
+
+# ============ Python ============
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+
+# ============ 环境变量 (secret) ============
+.env
+.env.local
+.env.*.local
+
+# ============ IDE ============
+.vscode/
+.idea/
+*.swp
+
+# ============ OS ============
+.DS_Store
+Thumbs.db
+
+# ============ 临时 ============
+*.log
+*.tmp
