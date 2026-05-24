@@ -1,12 +1,67 @@
-// === BEGIN qianjuan: base path + fetch interceptor ===
+// === BEGIN qianjuan: base path + fetch interceptor + auth token ===
 // 让前端在 "/" 根路径(本地 dev)和 "/toolbox/qianjuan/" 子路径(生产)下都能工作
+// 同时为 /api/* 自动挂上 AI 秘密基地登录态:
+//   优先 1. Authorization: Bearer <ec_ai_token>  (老路径, 主站签发的 JWT)
+//   优先 2. X-Forum-Current-User: base64(JSON)   (新路径, 同源 localStorage trust)
 (function () {
   const pathMatch = window.location.pathname.match(/^(\/toolbox\/[^/]+)\//);
   window.QJ_BASE = pathMatch ? pathMatch[1] : '';
+  window.QJ_LOGIN_URL = 'https://www.aisecretlair.com/';
+  window.QJ_TOKEN_KEY = 'ec_ai_token';
+  window.QJ_FORUM_USER_KEY = 'aisecretlair-forum-current-user';
+  window.qjGetAuthToken = function () {
+    try { return window.localStorage.getItem(window.QJ_TOKEN_KEY) || ''; } catch (_) { return ''; }
+  };
+  window.qjClearAuthToken = function () {
+    try { window.localStorage.removeItem(window.QJ_TOKEN_KEY); } catch (_) {}
+  };
+  // 读 ai秘密基地主站 forum 当前用户 (同源 localStorage), base64-url 编码成 header 值
+  window.qjGetForumUserHeader = function () {
+    try {
+      const raw = window.localStorage.getItem(window.QJ_FORUM_USER_KEY);
+      if (!raw) return '';
+      // 校验是合法 JSON 且有 id, 防止旧脏数据
+      const u = JSON.parse(raw);
+      if (!u || !u.id) return '';
+      // base64url (utf-8 安全): 先 encodeURIComponent 防中文 btoa 报错
+      const utf8 = unescape(encodeURIComponent(JSON.stringify({
+        id: String(u.id),
+        email: u.email || '',
+        nickname: u.nickname || '',
+      })));
+      return btoa(utf8).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    } catch (_) { return ''; }
+  };
+  window.qjHasForumUser = function () {
+    return !!window.qjGetForumUserHeader();
+  };
   const _origFetch = window.fetch.bind(window);
+  window._origRawFetch = _origFetch;  // 留给诊断面板:绕过千卷子路径前缀
   window.fetch = function (input, init) {
-    if (typeof input === 'string' && input.startsWith('/api/')) {
-      return _origFetch(window.QJ_BASE + input, init);
+    const isApi = typeof input === 'string' && input.startsWith('/api/');
+    if (isApi) {
+      const opts = Object.assign({}, init || {});
+      const headers = new Headers(opts.headers || {});
+      const token = window.qjGetAuthToken();
+      if (token && !headers.has('Authorization')) {
+        headers.set('Authorization', 'Bearer ' + token);
+      }
+      // 同源 localStorage trust 通道
+      const forumHdr = window.qjGetForumUserHeader();
+      if (forumHdr && !headers.has('X-Forum-Current-User')) {
+        headers.set('X-Forum-Current-User', forumHdr);
+      }
+      opts.headers = headers;
+      return _origFetch(window.QJ_BASE + input, opts).then(function (resp) {
+        // 401 → 清掉过期 token 并触发遮罩
+        if (resp.status === 401) {
+          window.qjClearAuthToken();
+          if (typeof window.qjRenderAuthGate === 'function') {
+            try { window.qjRenderAuthGate(true); } catch (_) {}
+          }
+        }
+        return resp;
+      });
     }
     return _origFetch(input, init);
   };
@@ -78,6 +133,67 @@ function showToast(message) {
   toast.classList.add("show");
   window.clearTimeout(showToast.timer);
   showToast.timer = window.setTimeout(() => toast.classList.remove("show"), 2200);
+}
+
+// 走 fetch(自动带子路径前缀);
+// 现代浏览器(Chrome/Edge)用 showSaveFilePicker 弹原生保存对话框,默认定位桌面;
+// Firefox/Safari 等不支持的浏览器自动回退到普通 Blob 下载(浏览器默认下载文件夹)。
+async function downloadExport(path) {
+  try {
+    const response = await fetch(path);
+    if (!response.ok) {
+      let message = `导出失败（HTTP ${response.status}）`;
+      try {
+        const data = await response.json();
+        if (data && data.error) message = data.error;
+      } catch (_) {}
+      showToast(message);
+      return;
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const match = disposition.match(/filename\*?="?([^";]+)"?/i);
+    const filename = match ? decodeURIComponent(match[1].replace(/^UTF-8''/i, "")) : "export.txt";
+
+    // 优先用 File System Access API:能弹原生保存对话框,startIn:"desktop" 让对话框默认定位桌面
+    if (typeof window.showSaveFilePicker === "function") {
+      try {
+        const handle = await window.showSaveFilePicker({
+          suggestedName: filename,
+          startIn: "desktop",
+          types: [
+            {
+              description: "文本文档",
+              accept: { "text/plain": [".txt"] },
+            },
+          ],
+        });
+        const writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+        showToast(`已保存到桌面：${handle.name || filename}`);
+        return;
+      } catch (pickerErr) {
+        // 用户取消保存对话框时不报错,静默退出
+        if (pickerErr && pickerErr.name === "AbortError") return;
+        // 其他异常(如权限被拒)走回退
+        console.warn("showSaveFilePicker 失败，回退到普通下载", pickerErr);
+      }
+    }
+
+    // 回退:普通 Blob 下载,落到浏览器默认下载文件夹
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    showToast(`已下载 ${filename}（保存在浏览器默认下载位置）`);
+  } catch (error) {
+    showToast(`导出失败：${error.message || error}`);
+  }
 }
 
 function escapeHtml(value) {
@@ -416,7 +532,7 @@ function renderBookOverview() {
 
   archiveList.querySelectorAll(".archive-export").forEach((button) => {
     button.addEventListener("click", () => {
-      window.location.href = `/api/export/markdown?chapter=${button.dataset.chapter}`;
+      downloadExport(`/api/export/markdown?chapter=${button.dataset.chapter}`);
     });
   });
 
@@ -583,8 +699,13 @@ function renderIdeaDraft() {
   document.getElementById("ideaLength").textContent = `${idea.storyLengthLabel || "长篇连载"} · 目标 ${formatWords(idea.targetWords)} · ${
     idea.targetChapters || "--"
   } 章；${idea.planningRule || "按当前篇幅生成大纲和章节细纲。"}`;
-  document.getElementById("ideaSellingPoint").textContent = idea.sellingPoint;
-  document.getElementById("ideaWorld").textContent = idea.worldSetting;
+  renderIdeaGenrePicker(idea);
+  renderCandidateSyncBanner(idea);
+  setIdeaBoxText("ideaSelectedSynopsis", idea.selectedSynopsis || "");
+  setIdeaBoxText("ideaSellingPoint", idea.sellingPoint);
+  setIdeaBoxText("ideaWorld", idea.worldSetting);
+  setIdeaBoxText("ideaMainConflict", idea.mainConflict || "");
+  setIdeaBoxText("ideaFirstGoal", idea.firstGoal || "");
   const deep = idea.deepRules || {};
   document.getElementById("ideaDeepRules").innerHTML = `
     <div class="genre-rule-card">
@@ -655,6 +776,436 @@ function renderIdeaDraft() {
       `,
     )
     .join("");
+  renderAllBoxActions(idea);
+  renderIdeaConfirm(idea);
+}
+
+function setIdeaBoxText(elementId, value) {
+  const el = document.getElementById(elementId);
+  if (el) el.textContent = value || "（待补充）";
+}
+
+// 流派枚举(键名必须与后端 GENRE_DEEP_CONFIGS 对齐)
+const GENRE_OPTIONS = [
+  { key: "xuanhuan", label: "玄幻修仙" },
+  { key: "urban", label: "都市系统" },
+  { key: "rebirth", label: "重生/穿越" },
+  { key: "romance", label: "情感言情" },
+  { key: "scifi", label: "科幻/星际" },
+  { key: "weird_rules", label: "规则怪谈/诡异复苏" },
+  { key: "beast_taming", label: "御兽" },
+  { key: "infinite", label: "无限流/副本" },
+  { key: "gaowu", label: "高武/灵气复苏" },
+  { key: "apocalypse", label: "末世囤货/天灾" },
+  { key: "game_invasion", label: "游戏入侵/第四天灾" },
+  { key: "live_entertainment", label: "直播文娱" },
+  { key: "farming_building", label: "种田基建/经营" },
+  { key: "mystery_horror", label: "克苏鲁/民俗悬疑" },
+];
+
+function renderIdeaGenrePicker(idea) {
+  const labelEl = document.getElementById("ideaGenreLabel");
+  const select = document.getElementById("ideaGenreSelect");
+  if (!labelEl || !select) return;
+  const currentKey = idea.genre || "xuanhuan";
+  const currentLabel = idea.genreLabel || GENRE_OPTIONS.find((g) => g.key === currentKey)?.label || currentKey;
+  labelEl.textContent = currentLabel;
+  // 第一次渲染时填 options
+  if (select.dataset.bound !== "1") {
+    select.innerHTML =
+      `<option value="">↻ 不对，改成...</option>` +
+      GENRE_OPTIONS.map((g) => `<option value="${g.key}">${escapeHtml(g.label)}</option>`).join("");
+    select.addEventListener("change", async (event) => {
+      const target = event.target.value;
+      if (!target) return;
+      const ideaNow = pendingIdeaDraft();
+      if (!ideaNow) return;
+      if (target === ideaNow.genre) {
+        event.target.value = "";
+        return;
+      }
+      const oldValue = event.target.value;
+      event.target.disabled = true;
+      try {
+        await mutate("/api/ideation/set-genre", { genre: target }, "已改判流派");
+      } finally {
+        event.target.disabled = false;
+        // 重新渲染会重置 value
+      }
+    });
+    select.dataset.bound = "1";
+  }
+  // 每次渲染都重置 select 到占位符
+  select.value = "";
+}
+
+// 改判流派后,渲染「同步候选」横幅(标题/主角/简介候选还是旧流派 LLM 生成的)
+function renderCandidateSyncBanner(idea) {
+  const host = document.getElementById("ideaGenreBox");
+  if (!host) return;
+  let banner = host.querySelector(".candidate-sync-banner");
+  const stale = idea && idea.candidatesStaleAfterGenre;
+  if (!stale) {
+    if (banner) banner.remove();
+    return;
+  }
+  // 本次会话内用户已经点了「× 不用了」(同一 stale 来源才抑制,改判后再次出现的横幅会重新弹)
+  if (host.dataset.syncDismissedFor === stale) {
+    if (banner) banner.remove();
+    return;
+  }
+  // 来源变了或者没 dismiss 过,清掉旧的 dismiss 标记
+  if (host.dataset.syncDismissedFor && host.dataset.syncDismissedFor !== stale) {
+    delete host.dataset.syncDismissedFor;
+  }
+  const currentLabel = idea.genreLabel || idea.genre || "当前流派";
+  if (!banner) {
+    banner = document.createElement("div");
+    banner.className = "candidate-sync-banner";
+    host.appendChild(banner);
+  }
+  banner.innerHTML = `
+    <span class="sync-text">「标题 / 主角 / 简介」候选还是按「${escapeHtml(stale)}」生成的,要不要同步成「${escapeHtml(currentLabel)}」?</span>
+    <button type="button" class="box-action-btn sync-btn">✨ 一键同步候选</button>
+    <button type="button" class="sync-dismiss" title="本次不用">×</button>
+  `;
+  const syncBtn = banner.querySelector(".sync-btn");
+  const dismissBtn = banner.querySelector(".sync-dismiss");
+  syncBtn.addEventListener("click", async () => {
+    syncBtn.disabled = true;
+    syncBtn.textContent = "同步中...";
+    try {
+      await mutate("/api/ideation/regenerate-candidates", {}, "候选已同步");
+    } finally {
+      // 失败时 mutate 已经 toast,横幅由后端 state 决定是否还在
+      syncBtn.disabled = false;
+    }
+  });
+  dismissBtn.addEventListener("click", () => {
+    host.dataset.syncDismissedFor = stale;
+    banner.remove();
+  });
+}
+
+// 单文本字段(可手改 + AI 打磨)
+const POLISH_TEXT_FIELDS = new Set([
+  "selectedSynopsis",
+  "sellingPoint",
+  "worldSetting",
+  "mainConflict",
+  "firstGoal",
+]);
+// 数组字段(只支持整组重生成)
+const POLISH_ARRAY_FIELDS = new Set([
+  "recommendedTitles",
+  "recommendedProtagonists",
+  "synopsisOptions",
+]);
+const POLISH_FIELD_LABELS = {
+  selectedSynopsis: "简介",
+  sellingPoint: "核心卖点",
+  worldSetting: "世界观",
+  mainConflict: "主冲突",
+  firstGoal: "第一章目标",
+  recommendedTitles: "推荐书名",
+  recommendedProtagonists: "主角名候选",
+  synopsisOptions: "简介候选",
+};
+
+function renderAllBoxActions(idea) {
+  document.querySelectorAll(".idea-box[data-field]").forEach((box) => {
+    const field = box.dataset.field;
+    const actions = box.querySelector(".box-actions");
+    if (!actions) return;
+    renderBoxActions(actions, field, idea);
+  });
+}
+
+function renderBoxActions(container, field, idea) {
+  const revisions = (idea.revisions || []).filter((rev) => rev.field === field);
+  const isText = POLISH_TEXT_FIELDS.has(field);
+  const isArray = POLISH_ARRAY_FIELDS.has(field);
+  const buttons = [];
+  if (isText) {
+    buttons.push(
+      `<button type="button" class="box-action-btn" data-polish="edit" data-field="${field}" title="手动编辑">✏️ 我来改</button>`,
+    );
+  }
+  if (isText || isArray) {
+    buttons.push(
+      `<button type="button" class="box-action-btn" data-polish="refine" data-field="${field}" title="AI 按指令改写">✨ AI 改写</button>`,
+    );
+  }
+  buttons.push(
+    `<button type="button" class="box-action-btn" data-polish="history" data-field="${field}" title="查看修订历史">📜 历史 (${revisions.length})</button>`,
+  );
+  container.innerHTML = buttons.join("");
+  container.querySelectorAll(".box-action-btn").forEach((btn) => {
+    btn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const action = btn.dataset.polish;
+      if (action === "edit") openInlineEditor(field);
+      else if (action === "refine") openRefineDialog(field);
+      else if (action === "history") openHistoryDrawer(field);
+    });
+  });
+  // 点正文区域 = 进入手改(只对单文本字段生效)
+  if (isText) {
+    const box = container.closest(".idea-box");
+    if (box) {
+      const target = box.querySelector(":scope > p");
+      if (target && !target.dataset.clickEditBound) {
+        target.dataset.clickEditBound = "1";
+        target.addEventListener("click", (ev) => {
+          if (box.querySelector(".inline-editor")) return;
+          ev.stopPropagation();
+          openInlineEditor(field);
+        });
+      }
+    }
+  }
+}
+
+function findIdeaBoxByField(field) {
+  return document.querySelector(`.idea-box[data-field="${field}"]`);
+}
+
+function openInlineEditor(field) {
+  const idea = pendingIdeaDraft();
+  if (!idea) return;
+  if (!POLISH_TEXT_FIELDS.has(field)) {
+    showToast("该字段不支持手改");
+    return;
+  }
+  const box = findIdeaBoxByField(field);
+  if (!box) return;
+  // 防止重复打开
+  if (box.querySelector(".inline-editor")) return;
+  const current = idea[field] || "";
+  const label = POLISH_FIELD_LABELS[field] || field;
+  const editor = document.createElement("div");
+  editor.className = "inline-editor";
+  editor.innerHTML = `
+    <textarea class="inline-editor-textarea" rows="5" placeholder="编辑${escapeHtml(label)}...">${escapeHtml(current)}</textarea>
+    <div class="inline-editor-actions">
+      <button type="button" class="secondary-button inline-cancel">取消</button>
+      <button type="button" class="primary-button inline-save">保存</button>
+    </div>
+  `;
+  box.appendChild(editor);
+  const textarea = editor.querySelector("textarea");
+  textarea.focus();
+  editor.querySelector(".inline-cancel").addEventListener("click", () => editor.remove());
+  editor.querySelector(".inline-save").addEventListener("click", async () => {
+    const value = textarea.value.trim();
+    if (!value) {
+      showToast("内容不能为空");
+      return;
+    }
+    if (value === current.trim()) {
+      editor.remove();
+      return;
+    }
+    const saveBtn = editor.querySelector(".inline-save");
+    setButtonBusy(saveBtn, true, "保存中...");
+    try {
+      await mutate("/api/ideation/patch", { field, value }, "已记录手改");
+    } finally {
+      setButtonBusy(saveBtn, false);
+    }
+  });
+}
+
+function openRefineDialog(field) {
+  const idea = pendingIdeaDraft();
+  if (!idea) return;
+  if (!POLISH_TEXT_FIELDS.has(field) && !POLISH_ARRAY_FIELDS.has(field)) {
+    showToast("该字段不支持 AI 打磨");
+    return;
+  }
+  const label = POLISH_FIELD_LABELS[field] || field;
+  const isArray = POLISH_ARRAY_FIELDS.has(field);
+  const hint = isArray
+    ? `将由 AI 重生成「${label}」整组候选。可以补充期望方向，例如「更黑暗一点」「更偏都市感」。`
+    : `输入打磨指令，AI 将基于现有「${label}」内容改写。例如「更克制」「加一句钩子」。`;
+  const existing = document.getElementById("refineDialog");
+  if (existing) existing.remove();
+  const backdrop = document.createElement("div");
+  backdrop.id = "refineDialog";
+  backdrop.className = "modal-backdrop refine-dialog";
+  backdrop.innerHTML = `
+    <section class="modal refine-modal" role="dialog" aria-modal="true">
+      <header class="modal-header">
+        <h3>✨ AI 打磨：${escapeHtml(label)}</h3>
+        <button type="button" class="icon-button refine-close" aria-label="关闭">✕</button>
+      </header>
+      <div class="modal-body">
+        <p class="refine-hint">${escapeHtml(hint)}</p>
+        <textarea class="refine-instruction" rows="4" placeholder="例如：${escapeHtml(isArray ? "更带玄幻打怪升级感" : "更克制，多一点画面感")}"></textarea>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="secondary-button refine-close">取消</button>
+        <button type="button" class="primary-button refine-submit">${isArray ? "重生成整组" : "AI 打磨"}</button>
+      </div>
+    </section>
+  `;
+  document.body.appendChild(backdrop);
+  backdrop.classList.add("show");
+  backdrop.setAttribute("aria-hidden", "false");
+  const close = () => {
+    backdrop.remove();
+  };
+  backdrop.querySelectorAll(".refine-close").forEach((btn) => btn.addEventListener("click", close));
+  backdrop.addEventListener("click", (event) => {
+    if (event.target === backdrop) close();
+  });
+  const textarea = backdrop.querySelector(".refine-instruction");
+  textarea.focus();
+  const submit = backdrop.querySelector(".refine-submit");
+  submit.addEventListener("click", async () => {
+    const instruction = textarea.value.trim();
+    if (!instruction) {
+      showToast("请填写打磨指令");
+      return;
+    }
+    setButtonBusy(submit, true, "AI 改写中...");
+    try {
+      const payload = await mutate("/api/ideation/refine", { field, instruction }, "AI 打磨完成");
+      if (payload) {
+        close();
+      }
+    } finally {
+      setButtonBusy(submit, false);
+    }
+  });
+}
+
+function openHistoryDrawer(field) {
+  const idea = pendingIdeaDraft();
+  if (!idea) return;
+  const label = POLISH_FIELD_LABELS[field] || field;
+  const revisions = (idea.revisions || []).filter((rev) => rev.field === field);
+  const existing = document.getElementById("historyDrawer");
+  if (existing) existing.remove();
+  const backdrop = document.createElement("div");
+  backdrop.id = "historyDrawer";
+  backdrop.className = "modal-backdrop history-drawer";
+  const body = revisions.length
+    ? revisions
+        .slice()
+        .reverse()
+        .map((rev) => {
+          const sourceTag =
+            rev.source === "ai"
+              ? '<span class="rev-tag ai">✨ AI</span>'
+              : rev.source === "manual"
+                ? '<span class="rev-tag manual">✏️ 手改</span>'
+                : '<span class="rev-tag revert">↩ 回退</span>';
+          const instr = rev.instruction ? `<p class="rev-instruction">指令：${escapeHtml(rev.instruction)}</p>` : "";
+          return `
+            <article class="rev-card" data-rev-id="${escapeHtml(rev.id)}">
+              <header>
+                ${sourceTag}
+                <span class="rev-ts">${escapeHtml(formatDateTime(rev.ts))}</span>
+                <button type="button" class="secondary-button rev-revert" data-rev-id="${escapeHtml(rev.id)}">↩ 恢复此版本</button>
+              </header>
+              ${instr}
+              ${renderDiffPair(rev.before, rev.after)}
+            </article>
+          `;
+        })
+        .join("")
+    : `<p class="rev-empty">还没有修订历史。点 ✏️ 改 或 ✨ AI 打磨 来开始这个字段的迭代。</p>`;
+  backdrop.innerHTML = `
+    <section class="modal history-modal" role="dialog" aria-modal="true">
+      <header class="modal-header">
+        <h3>📜 修订历史：${escapeHtml(label)} (${revisions.length})</h3>
+        <button type="button" class="icon-button history-close" aria-label="关闭">✕</button>
+      </header>
+      <div class="modal-body history-body">
+        ${body}
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="secondary-button history-close">关闭</button>
+      </div>
+    </section>
+  `;
+  document.body.appendChild(backdrop);
+  backdrop.classList.add("show");
+  backdrop.setAttribute("aria-hidden", "false");
+  const close = () => backdrop.remove();
+  backdrop.querySelectorAll(".history-close").forEach((btn) => btn.addEventListener("click", close));
+  backdrop.addEventListener("click", (event) => {
+    if (event.target === backdrop) close();
+  });
+  backdrop.querySelectorAll(".rev-revert").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const revisionId = btn.dataset.revId;
+      setButtonBusy(btn, true, "回退中...");
+      try {
+        const payload = await mutate("/api/ideation/revert", { revisionId }, "已回退");
+        if (payload) close();
+      } finally {
+        setButtonBusy(btn, false);
+      }
+    });
+  });
+}
+
+function renderDiffPair(before, after) {
+  const fmt = (value) => {
+    if (Array.isArray(value)) {
+      return value
+        .map((item) => {
+          if (item && typeof item === "object") {
+            return `<li>${escapeHtml(item.style || "")} ｜ ${escapeHtml(item.text || item.content || "")}</li>`;
+          }
+          return `<li>${escapeHtml(String(item))}</li>`;
+        })
+        .join("");
+    }
+    return escapeHtml(String(value ?? ""));
+  };
+  const isGenreSnapshot = (v) => v && typeof v === "object" && !Array.isArray(v) && ("genreLabel" in v || "genre" in v);
+  const wrap = (value) => {
+    if (isGenreSnapshot(value)) {
+      return `<div class="diff-text"><strong>${escapeHtml(value.genreLabel || value.genre || "(未知)")}</strong></div>`;
+    }
+    if (Array.isArray(value)) {
+      return `<ul class="diff-list">${fmt(value)}</ul>`;
+    }
+    return `<div class="diff-text">${fmt(value)}</div>`;
+  };
+  return `
+    <div class="diff-pair">
+      <div class="diff-cell diff-before">
+        <strong>修订前</strong>
+        ${wrap(before)}
+      </div>
+      <div class="diff-arrow">→</div>
+      <div class="diff-cell diff-after">
+        <strong>修订后</strong>
+        ${wrap(after)}
+      </div>
+    </div>
+  `;
+}
+
+function renderIdeaConfirm(idea) {
+  const checkbox = document.getElementById("ideaConfirmCheckbox");
+  const adoptBtn = document.getElementById("adoptIdeaBtn");
+  if (checkbox) {
+    checkbox.checked = !!idea.confirmed;
+  }
+  if (adoptBtn) {
+    if (idea.confirmed) {
+      adoptBtn.disabled = false;
+      adoptBtn.textContent = "采用方案创建作品";
+    } else {
+      adoptBtn.disabled = true;
+      adoptBtn.textContent = "先勾选「确认设定」再创建";
+    }
+  }
 }
 
 function renderScenes() {
@@ -993,6 +1544,158 @@ function renderAgentSteps() {
   }
 }
 
+const AGENT_TL_ORDER = ["ideation", "planner", "scene_writer", "audit", "chief_editor", "truth"];
+const AGENT_TL_LABELS = {
+  ideation: "🧠 题材",
+  planner: "📐 章节规划",
+  scene_writer: "✍️ 写手",
+  audit: "🔍 审计",
+  chief_editor: "📝 总编",
+  truth: "📚 真相",
+};
+const AGENT_TL_STATUS_TEXT = {
+  idle: "等待中",
+  running: "运行中…",
+  done: "✓ 完成",
+  failed: "✗ 失败",
+  revising: "重写中…",
+  review_required: "⚠ 待人工",
+};
+
+function escapeAttr(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\n/g, " ");
+}
+
+function renderAgentTimeline() {
+  const root = document.getElementById("agentTimeline");
+  if (!root) return;
+  const timeline = appState.agentTimeline || [];
+  if (!timeline.length) {
+    root.hidden = true;
+    root.innerHTML = "";
+    return;
+  }
+  root.hidden = false;
+  // 每个 agent 取最近一条记录定状态
+  const latest = {};
+  for (const entry of timeline) latest[entry.agent] = entry;
+
+  const nodes = AGENT_TL_ORDER.map((id) => {
+    const entry = latest[id];
+    const status = entry ? entry.status : "idle";
+    const tip = entry ? `${entry.message || ""} · ${entry.ts || ""}` : "尚未开始";
+    const label = AGENT_TL_LABELS[id] || id;
+    const statusText = AGENT_TL_STATUS_TEXT[status] || status;
+    return `<div class="agent-tl-node status-${status}" title="${escapeAttr(tip)}">
+      <div class="agent-tl-emoji">${label}</div>
+      <div class="agent-tl-status">${statusText}</div>
+    </div>`;
+  });
+  root.innerHTML = `<div class="agent-tl-header">
+    <span class="agent-tl-title">🎬 AI 流水线</span>
+    <span class="agent-tl-hint">六个 agent 协作产出本章 · 鼠标悬停看上次输出</span>
+  </div>
+  <div class="agent-timeline-track">${nodes.join('<div class="agent-tl-arrow">→</div>')}</div>`;
+}
+
+function renderEditorReviewPanel() {
+  const root = document.getElementById("editorReviewPanel");
+  if (!root) return;
+  const review = appState.editorReview;
+  const requiresUser = appState.chiefEditorRequiresUser;
+  if (!review && !requiresUser) {
+    root.hidden = true;
+    root.innerHTML = "";
+    return;
+  }
+  if (!review) {
+    root.hidden = true;
+    return;
+  }
+  root.hidden = false;
+  const score = review.score != null ? review.score : "—";
+  const action = review.action || "revise";
+  const issues = (review.issues || []).map((it) => {
+    const sev = it.severity || "minor";
+    return `<li class="editor-issue editor-issue-${sev}">
+      <span class="editor-issue-sev">${sev}</span>
+      <span class="editor-issue-cat">${escapeAttr(it.category || "")}</span>
+      <div class="editor-issue-text">${escapeAttr(it.text || "")}</div>
+      ${it.suggestion ? `<div class="editor-issue-fix">建议：${escapeAttr(it.suggestion)}</div>` : ""}
+    </li>`;
+  }).join("");
+  const passed = action === "approve";
+  const actionBadge = passed
+    ? `<span class="editor-badge editor-badge-pass">${score}/100 · 通过</span>`
+    : `<span class="editor-badge editor-badge-fail">${score}/100 · ${action === "reject" ? "驳回" : "打回"}</span>`;
+  // 去 AI 味度量卡片 — 优先用最新一次诊断, 否则取总编审核时的快照
+  const metrics = appState.lastDeAiMetrics || review.deAiMetrics || {};
+  let metricsHtml = "";
+  if (metrics && metrics.chars_no_punct != null) {
+    const rows = [
+      { label: "章末钩子", value: metrics.has_chapter_hook ? "✓ 有" : "✗ 无", ok: !!metrics.has_chapter_hook, hint: "末段需含 ?! 或'竟然/突然'等转折词" },
+      { label: "单句成段率", value: `${(metrics.single_sent_para_ratio * 100).toFixed(0)}%`, ok: metrics.single_sent_para_ratio <= 0.70, hint: "爆款 P75 = 69%, 越低段落越饱满" },
+      { label: "对话段比例", value: `${(metrics.dialog_para_ratio * 100).toFixed(0)}%`, ok: metrics.dialog_para_ratio >= 0.25, hint: "爆款 P25 = 27% / P50 = 37%" },
+      { label: "平均句长", value: `${metrics.sent_avg} 字`, ok: metrics.sent_avg >= 14 && metrics.sent_avg <= 35, hint: "爆款 P50 = 18.4 字" },
+      { label: "AI 雷区词", value: `${metrics.ai_blacklist_total} 次`, ok: metrics.ai_blacklist_total < 3, hint: Object.keys(metrics.ai_blacklist_hits || {}).slice(0, 4).join(", ") || "无" },
+      { label: "升华句式", value: `${metrics.sublimation_hits} 次`, ok: metrics.sublimation_hits < 2, hint: "并非/不仅/宛若 模板" },
+    ];
+    metricsHtml = `<div class="editor-metrics">
+      <div class="editor-metrics-title">📊 去 AI 味度量(对标七猫 32 章爆款)</div>
+      <div class="editor-metrics-grid">${rows.map(r => `
+        <div class="editor-metric ${r.ok ? 'ok' : 'bad'}" title="${escapeAttr(r.hint)}">
+          <div class="editor-metric-label">${r.label}</div>
+          <div class="editor-metric-value">${r.value}</div>
+        </div>
+      `).join("")}</div>
+    </div>`;
+  }
+  const diagnoseBtn = `<button class="secondary-button" type="button" onclick="reRunDiagnostics()">🔬 重新诊断本章</button>`;
+  const buttons = requiresUser
+    ? `<div class="editor-actions">
+        <button class="primary-button" type="button" onclick="overrideEditor()">人工通过, 继续流程</button>
+        <button class="secondary-button" type="button" onclick="reRunScenes()">重新生成正文</button>
+        ${diagnoseBtn}
+      </div>`
+    : (passed
+        ? `<div class="editor-actions">${diagnoseBtn}</div>`
+        : `<div class="editor-actions"><button class="secondary-button" type="button" onclick="reRunEditor()">再审一次</button>${diagnoseBtn}</div>`);
+  root.innerHTML = `<div class="editor-review-header">
+    <span class="editor-title">📝 小说总编审核</span>
+    ${actionBadge}
+    ${review.model ? `<span class="editor-model">${escapeAttr(review.model)}</span>` : ""}
+  </div>
+  ${review.editorNotes ? `<div class="editor-notes">总编批注：${escapeAttr(review.editorNotes)}</div>` : ""}
+  ${issues ? `<ul class="editor-issues">${issues}</ul>` : ""}
+  ${buttons}`;
+}
+
+async function overrideEditor() {
+  await mutate("/api/editor/override", {}, "人工通过总编审核");
+}
+
+async function reRunEditor() {
+  await mutate("/api/editor/review", {}, "重新调用总编");
+}
+
+async function reRunScenes() {
+  await mutate("/api/scenes/generate", {}, "重新生成本章正文");
+}
+
+async function reRunDiagnostics() {
+  await mutate("/api/editor/metrics", {}, "重新诊断章节去 AI 味");
+}
+
+window.overrideEditor = overrideEditor;
+window.reRunEditor = reRunEditor;
+window.reRunScenes = reRunScenes;
+window.reRunDiagnostics = reRunDiagnostics;
+
 function renderAll() {
   if (!appState) return;
   updateHeader();
@@ -1009,8 +1712,52 @@ function renderAll() {
   renderTrace();
   renderLLMConfig();
   renderAgentSteps();
+  renderAgentTimeline();
+  renderEditorReviewPanel();
   renderIdeaDraft();
   renderProjectShelf();
+  renderExportReminder();
+}
+
+// 导出提醒横幅:已归档但未导出章节 ≥ 5 时浮在顶部
+function renderExportReminder() {
+  const reminder = appState && appState.exportReminder;
+  let bar = document.getElementById("exportReminderBar");
+  if (!reminder || !reminder.active) {
+    if (bar) bar.hidden = true;
+    return;
+  }
+  if (!bar) {
+    bar = document.createElement("div");
+    bar.id = "exportReminderBar";
+    bar.className = "export-reminder";
+    const app = document.querySelector(".app") || document.body;
+    app.insertBefore(bar, app.firstChild);
+  }
+  const n = reminder.chaptersSinceLastExport;
+  const lastNum = reminder.lastExportedChapter || 0;
+  bar.hidden = false;
+  bar.innerHTML = `
+    <div class="export-reminder-msg">
+      📥 已写完 <strong>${n}</strong> 章未导出${lastNum ? `(上次导出至第 ${lastNum} 章)` : ""}。建议立刻导出到本地,避免意外丢失。
+    </div>
+    <div class="export-reminder-actions">
+      <button class="primary" id="exportReminderDownload">立即导出全书</button>
+      <button id="exportReminderAck">我已导出 / 继续写</button>
+    </div>`;
+  document.getElementById("exportReminderDownload").addEventListener("click", async () => {
+    await downloadExport("/api/export/book");
+    // 后端在 GET 时已 bump lastExportedChapter,刷新一次 state
+    try { const p = await API.getState(); appState = p.state; renderAll(); } catch (_) {}
+  });
+  document.getElementById("exportReminderAck").addEventListener("click", async () => {
+    try {
+      const p = await API.post("/api/export/acknowledge", {});
+      appState = p.state;
+      showToast(p.message || "已确认导出");
+      renderAll();
+    } catch (e) { showToast(e.message || "确认失败"); }
+  });
 }
 
 async function runPrimaryWorkflow() {
@@ -1024,7 +1771,7 @@ async function runPrimaryWorkflow() {
   if (!workflow) return;
   const endpoint = workflow.primaryEndpoint;
   if (workflow.primaryEndpoint === "/api/export/markdown") {
-    window.location.href = "/api/export/markdown";
+    downloadExport("/api/export/markdown");
     return;
   }
   const headerButton = document.getElementById("runWorkflowBtn");
@@ -1204,15 +1951,15 @@ function bindEvents() {
   });
 
   document.getElementById("exportBtn").addEventListener("click", () => {
-    window.location.href = "/api/export/markdown";
+    downloadExport("/api/export/markdown");
   });
 
   document.getElementById("exportBookBtn").addEventListener("click", () => {
-    window.location.href = "/api/export/book";
+    downloadExport("/api/export/book");
   });
 
   document.getElementById("bookExportBtn").addEventListener("click", () => {
-    window.location.href = "/api/export/book";
+    downloadExport("/api/export/book");
   });
 
   document.getElementById("bookContinueBtn").addEventListener("click", () => switchView("workspace"));
@@ -1233,7 +1980,7 @@ function bindEvents() {
   });
 
   document.getElementById("finishExportBtn").addEventListener("click", () => {
-    window.location.href = "/api/export/markdown";
+    downloadExport("/api/export/markdown");
   });
 
   document.getElementById("finishNextChapterBtn").addEventListener("click", async (event) => {
@@ -1300,7 +2047,7 @@ function bindEvents() {
   });
   document.getElementById("readerExportBtn").addEventListener("click", (event) => {
     const chapter = event.currentTarget.dataset.chapter;
-    if (chapter) window.location.href = `/api/export/markdown?chapter=${chapter}`;
+    if (chapter) downloadExport(`/api/export/markdown?chapter=${chapter}`);
   });
   document.getElementById("newProjectModal").addEventListener("click", (event) => {
     if (event.target.id === "newProjectModal") closeNewProjectModal();
@@ -1354,6 +2101,10 @@ function bindEvents() {
       showToast("请先生成题材书案");
       return;
     }
+    if (!idea.confirmed) {
+      showToast("请先勾选「我已通读并确认」");
+      return;
+    }
     const button = event.currentTarget;
     setButtonBusy(button, true, "正在创建...");
     try {
@@ -1369,10 +2120,53 @@ function bindEvents() {
       setButtonBusy(button, false);
     }
   });
+
+  const confirmCheckbox = document.getElementById("ideaConfirmCheckbox");
+  if (confirmCheckbox) {
+    confirmCheckbox.addEventListener("change", async (event) => {
+      const idea = pendingIdeaDraft();
+      if (!idea) {
+        showToast("请先生成题材书案");
+        event.target.checked = false;
+        return;
+      }
+      await mutate("/api/ideation/confirm", { confirmed: event.target.checked });
+    });
+  }
 }
 
 async function init() {
   bindEvents();
+  // === 登录门: 优先消费 URL 上的 ?token=,然后查 /api/auth/status ===
+  try {
+    const qp = new URLSearchParams(window.location.search);
+    const incoming = qp.get("token");
+    if (incoming) {
+      try { window.localStorage.setItem(window.QJ_TOKEN_KEY, incoming); } catch (_) {}
+      qp.delete("token");
+      const clean = window.location.pathname + (qp.toString() ? "?" + qp.toString() : "") + window.location.hash;
+      window.history.replaceState({}, "", clean);
+    }
+  } catch (_) {}
+
+  let authed = false;
+  let authedEmail = null;
+  try {
+    const ar = await fetch("/api/auth/status");
+    const aj = await ar.json();
+    authed = !!aj.authenticated;
+    authedEmail = aj.email || null;
+  } catch (_) {
+    authed = false;
+  }
+  // 临时:鉴权拦截已取消, 前端登录门也强制放行 (2026-05-24)
+  authed = true;
+  if (!authed) {
+    window.qjRenderAuthGate(true);
+    return;
+  }
+  window.qjRenderAuthGate(false, authedEmail);
+
   try {
     const [payload, modelStatus, modelConfig, projects] = await Promise.all([
       API.getState(),
@@ -1390,5 +2184,163 @@ async function init() {
     showToast(`加载失败：${error.message}`);
   }
 }
+
+// === 登录遮罩: 未登录时盖在 .app 之上,引导跳主站 SSO ===
+// 自动同步:监听 storage 事件 + 切回标签时重测一次,主站登录后无需刷新即可解锁
+let _qjAuthCheckInFlight = false;
+async function qjRecheckAuth() {
+  if (_qjAuthCheckInFlight) return;
+  _qjAuthCheckInFlight = true;
+  try {
+    const r = await fetch("/api/auth/status");
+    const j = await r.json();
+    if (j.authenticated) {
+      window.qjRenderAuthGate(false, j.email);
+      // 第一次解锁需要把主数据拉一次
+      if (!appState) {
+        try {
+          const [payload, modelStatus, modelConfig, projects] = await Promise.all([
+            API.getState(),
+            API.getLLMStatus().catch(() => null),
+            API.getLLMConfig().catch(() => null),
+            API.getProjects().catch(() => []),
+          ]);
+          appState = payload.state;
+          llmStatus = modelStatus;
+          llmConfig = modelConfig;
+          projectList = projects;
+          selectedSceneId = appState.scenes[0]?.id || null;
+          renderAll();
+          showToast(`已识别到登录,欢迎 ${j.email || ""}`);
+        } catch (e) { showToast("加载失败: " + e.message); }
+      }
+    }
+  } catch (_) {}
+  _qjAuthCheckInFlight = false;
+}
+
+window.qjRenderAuthGate = function (masked, email) {
+  let gate = document.getElementById("authGate");
+  if (masked) {
+    if (!gate) {
+      gate = document.createElement("div");
+      gate.id = "authGate";
+      gate.className = "auth-gate";
+      gate.innerHTML = `
+        <div class="auth-gate-card">
+          <div class="auth-gate-title">🔒 请先登录 AI 秘密基地</div>
+          <div class="auth-gate-sub">千卷已并入 AI 秘密基地账号体系。如果你已在主站登录,通常会自动识别;如未识别,可点「诊断」查看原因。</div>
+          <div class="auth-gate-row">
+            <button id="authGateGoLogin" class="primary auth-gate-btn">前往主站登录</button>
+            <button id="authGateRetry" class="auth-gate-btn-ghost">我已登录,重试</button>
+            <button id="authGateDiag" class="auth-gate-btn-ghost">诊断</button>
+          </div>
+          <div id="authGateDiagPanel" class="auth-gate-diag" hidden>
+            <div class="auth-gate-diag-row">
+              <span class="auth-gate-diag-label">localStorage["ec_ai_token"]:</span>
+              <span id="authGateDiagToken" class="auth-gate-diag-value">-</span>
+            </div>
+            <div class="auth-gate-diag-row">
+              <span class="auth-gate-diag-label">主站 /api/auth/me:</span>
+              <span id="authGateDiagMe" class="auth-gate-diag-value">-</span>
+            </div>
+            <div class="auth-gate-diag-row">
+              <span class="auth-gate-diag-label">千卷 /api/auth/status:</span>
+              <span id="authGateDiagStatus" class="auth-gate-diag-value">-</span>
+            </div>
+            <div class="auth-gate-diag-help">
+              如果 localStorage 显示「无」,说明主站没有登录(或登录的不是同一个域名 / 浏览器);
+              如果主站 /api/auth/me 返回用户但千卷 /api/auth/status 显示未登录,是后端密钥不匹配,联系管理员。
+            </div>
+            <div class="auth-gate-diag-paste">
+              <label class="auth-gate-diag-label">手动粘贴 token(应急,在主站 DevTools → Application → Local Storage → 复制 ec_ai_token 的值):</label>
+              <textarea id="authGatePasteToken" rows="3" placeholder="粘贴 ec_ai_token 到这里"></textarea>
+              <button id="authGatePasteApply" class="auth-gate-btn-ghost">应用并解锁</button>
+            </div>
+          </div>
+          <div class="auth-gate-hint">主站登录后切回本标签会自动重测,不用刷新。</div>
+        </div>`;
+      document.body.appendChild(gate);
+      document.getElementById("authGateGoLogin").addEventListener("click", function () {
+        // 新标签页打开,保留当前千卷页面;主站登录后切回本页自动 recheck
+        window.open(window.QJ_LOGIN_URL, "_blank", "noopener");
+      });
+      document.getElementById("authGateRetry").addEventListener("click", function () {
+        qjRecheckAuth();
+      });
+      document.getElementById("authGateDiag").addEventListener("click", async function () {
+        const panel = document.getElementById("authGateDiagPanel");
+        panel.hidden = !panel.hidden;
+        if (panel.hidden) return;
+        // 1) localStorage token
+        const t = window.qjGetAuthToken();
+        document.getElementById("authGateDiagToken").textContent =
+          t ? `存在 (长度 ${t.length}, 前缀 ${t.slice(0, 16)}..)` : "无 — 你尚未在本浏览器同源下登录";
+        // 2) 主站 /api/auth/me (用原始 fetch 绕过千卷子路径前缀,直达主站 Express)
+        try {
+          const headers = t ? { Authorization: "Bearer " + t } : {};
+          const r = await (window._origRawFetch || fetch)("/api/auth/me", { headers });
+          const txt = await r.text();
+          document.getElementById("authGateDiagMe").textContent =
+            r.ok ? `200 OK — ${txt.slice(0, 80)}...` : `${r.status} — ${txt.slice(0, 120)}`;
+        } catch (e) {
+          document.getElementById("authGateDiagMe").textContent = "请求失败: " + e.message;
+        }
+        // 3) 千卷 /api/auth/status
+        try {
+          const r = await fetch("/api/auth/status");
+          const j = await r.json();
+          document.getElementById("authGateDiagStatus").textContent =
+            j.authenticated ? `已识别: ${j.email}` : "未识别 (authenticated=false)";
+        } catch (e) {
+          document.getElementById("authGateDiagStatus").textContent = "请求失败: " + e.message;
+        }
+      });
+      document.getElementById("authGatePasteApply").addEventListener("click", function () {
+        const v = (document.getElementById("authGatePasteToken").value || "").trim();
+        if (!v) { showToast("token 不能为空"); return; }
+        try {
+          window.localStorage.setItem(window.QJ_TOKEN_KEY, v);
+          qjRecheckAuth();
+        } catch (e) { showToast("写入失败: " + e.message); }
+      });
+      // 跨标签同步:另一个标签 setItem('ec_ai_token', ...) 时本标签收到事件
+      window.addEventListener("storage", function (e) {
+        if (e.key === window.QJ_TOKEN_KEY && e.newValue) {
+          qjRecheckAuth();
+        }
+      });
+      // 切回标签 / 窗口聚焦 → 重测一次
+      document.addEventListener("visibilitychange", function () {
+        if (!document.hidden && document.getElementById("authGate") && !document.getElementById("authGate").hidden) {
+          qjRecheckAuth();
+        }
+      });
+      window.addEventListener("focus", function () {
+        const g = document.getElementById("authGate");
+        if (g && !g.hidden) qjRecheckAuth();
+      });
+    }
+    gate.hidden = false;
+  } else {
+    if (gate) gate.hidden = true;
+    // 在顶栏右侧露出 email + 退出
+    const slot = document.getElementById("authBadge") || (function () {
+      const el = document.createElement("div");
+      el.id = "authBadge";
+      el.className = "auth-badge";
+      document.body.appendChild(el);
+      return el;
+    })();
+    if (email) {
+      slot.innerHTML = `<span class="auth-badge-email" title="${email}">${email}</span><button id="authBadgeLogout" class="auth-badge-logout">退出</button>`;
+      const btn = document.getElementById("authBadgeLogout");
+      if (btn) btn.addEventListener("click", function () {
+        window.qjClearAuthToken();
+        window.location.reload();
+      });
+    }
+  }
+};
 
 init();

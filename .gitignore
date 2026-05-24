@@ -32,3 +32,8 @@ Thumbs.db
 # ============ 临时 ============
 *.log
 *.tmp
+.claude/
+.cookies
+*.bak-pre-*
+r*.json
+preview-error-page.html

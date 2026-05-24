@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from pathlib import Path
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ AGENT_ROLES = [
     {"id": "planner", "label": "章节规划"},
     {"id": "scene_writer", "label": "正文写手"},
     {"id": "audit", "label": "审计修订"},
+    {"id": "chief_editor", "label": "小说总编"},
     {"id": "truth", "label": "真相归档"},
 ]
 
@@ -39,6 +41,83 @@ _RUNTIME_BY_USER: dict[str, dict[str, str]] = {}
 _RUNTIME_AGENTS_BY_USER: dict[str, dict[str, dict[str, str]]] = {}
 _ANONYMOUS = "_anonymous"
 
+# === 持久化:每用户配置落盘 + Fernet 加密 ===
+_DATA_USERS_DIR = Path(__file__).parent / "data" / "users"
+_LOADED_USERS: set[str] = set()
+_LOAD_LOCK = threading.Lock()
+_VAULT_FERNET = None  # lazy
+
+def _vault():
+    global _VAULT_FERNET
+    if _VAULT_FERNET is not None:
+        return _VAULT_FERNET
+    key = (os.environ.get("QJ_LLM_VAULT_KEY") or "").strip().encode()
+    if not key:
+        return None  # 没配 vault key 就降级为不持久化(纯内存),不静默写明文
+    from cryptography.fernet import Fernet
+    _VAULT_FERNET = Fernet(key)
+    return _VAULT_FERNET
+
+def _user_config_path(uid: str) -> Path:
+    return _DATA_USERS_DIR / uid / "llm_config.json"
+
+def _load_user_config(uid: str) -> None:
+    """首次访问该 uid 时调一次。从磁盘解密并填充内存字典。"""
+    if uid in _LOADED_USERS:
+        return
+    with _LOAD_LOCK:
+        if uid in _LOADED_USERS:
+            return
+        _LOADED_USERS.add(uid)
+        f = _vault()
+        if not f:
+            return
+        path = _user_config_path(uid)
+        if not path.exists():
+            return
+        try:
+            blob = path.read_bytes()
+            data = json.loads(f.decrypt(blob).decode("utf-8"))
+        except Exception:
+            # 解密失败(vault key 轮换过 / 文件损坏) — 不破坏服务,只跳过
+            return
+        g = data.get("global") or {}
+        if isinstance(g, dict):
+            _RUNTIME_BY_USER.setdefault(uid, {}).update({k: str(v) for k, v in g.items() if v})
+        a = data.get("agents") or {}
+        if isinstance(a, dict):
+            bucket = _RUNTIME_AGENTS_BY_USER.setdefault(uid, {})
+            for role_id, cfg in a.items():
+                if isinstance(cfg, dict):
+                    bucket.setdefault(role_id, {}).update({k: str(v) for k, v in cfg.items() if v})
+
+def _save_user_config(uid: str) -> None:
+    """配置更新后调一次。加密后原子写盘,文件 0600 / 目录 0700。"""
+    if uid == _ANONYMOUS:
+        return  # 匿名用户不落盘
+    f = _vault()
+    if not f:
+        return  # 没配 vault key 则不落盘(避免明文)
+    payload = {
+        "global": _RUNTIME_BY_USER.get(uid, {}),
+        "agents": _RUNTIME_AGENTS_BY_USER.get(uid, {}),
+    }
+    blob = f.encrypt(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+    path = _user_config_path(uid)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_bytes(blob)
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
+    os.replace(tmp, path)
+
+
 
 def set_user_id(uid: str | None) -> None:
     """server.py 每次请求入口处调用一次,设置当前线程的 user_id。"""
@@ -50,11 +129,15 @@ def _current_uid() -> str:
 
 
 def _user_global() -> dict[str, str]:
-    return _RUNTIME_BY_USER.setdefault(_current_uid(), {})
+    uid = _current_uid()
+    _load_user_config(uid)
+    return _RUNTIME_BY_USER.setdefault(uid, {})
 
 
 def _user_agents() -> dict[str, dict[str, str]]:
-    return _RUNTIME_AGENTS_BY_USER.setdefault(_current_uid(), {})
+    uid = _current_uid()
+    _load_user_config(uid)
+    return _RUNTIME_AGENTS_BY_USER.setdefault(uid, {})
 
 
 def _env_llm_config() -> LLMConfig:
@@ -146,6 +229,16 @@ def update_runtime_llm_config(config: dict[str, Any]) -> None:
             value = str(role_config.get(source) or "").strip()
             if value:
                 current[target] = value
+
+    # 验收:用户自定义 apiKey 时必须有 model,否则会用服务器默认 model 名导致 404
+    if g.get("apiKey") and not g.get("model"):
+        raise RuntimeError("配了自定义 API Key 就必须填全局模型名(例如 deepseek-chat / gpt-4o-mini / claude-3-5-sonnet-latest),否则会用错模型导致生成失败。")
+    for role_id, current in user_agents.items():
+        if current.get("apiKey") and not current.get("model") and not g.get("model"):
+            role_label = next((r["label"] for r in AGENT_ROLES if r["id"] == role_id), role_id)
+            raise RuntimeError(f"{role_label} 配了独立 API Key,但没填模型名,且全局也没配模型名。请至少填一个。")
+
+    _save_user_config(_current_uid())
 
 
 def public_llm_config() -> dict[str, Any]:

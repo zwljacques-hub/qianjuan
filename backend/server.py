@@ -87,6 +87,67 @@ def _safe_uid(value: str | None) -> str | None:
     return value
 
 
+def _safe_ec_uid(value: str | None) -> str | None:
+    """白名单校验 AI 秘密基地主站 uid:nanoid 默认字母表 [A-Za-z0-9_-],主站签发为 20 字符。
+
+    放宽到 8-40 长度以兼容未来变更。
+    """
+    if not value:
+        return None
+    value = value.strip()
+    if not re.fullmatch(r"[A-Za-z0-9_\-]{8,40}", value):
+        return None
+    return value
+
+
+# ============================================================
+# AI 秘密基地主站 JWT 验签 (HMAC-SHA256, 与 server/services/local-auth.ts 同算法)
+# Token 结构: <base64url(payload)>.<base64url(sig)>
+# Payload: {uid, email, exp}  exp 是毫秒时间戳
+# ============================================================
+_EC_AI_JWT_SECRET = (os.environ.get("EC_AI_JWT_SECRET") or "").encode("utf-8")
+
+
+def verify_ec_ai_token(token: str) -> dict[str, Any] | None:
+    """验签主站 token。失败返回 None。"""
+    import base64
+    import hashlib
+    import hmac
+
+    if not _EC_AI_JWT_SECRET or not token:
+        return None
+    parts = token.split(".")
+    if len(parts) != 2:
+        return None
+    body_b64, sig_b64 = parts
+    try:
+        expected_sig = hmac.new(_EC_AI_JWT_SECRET, body_b64.encode("utf-8"), hashlib.sha256).digest()
+        # base64url 解码 sig
+        pad = "=" * ((4 - len(sig_b64) % 4) % 4)
+        actual_sig = base64.urlsafe_b64decode(sig_b64 + pad)
+        if not hmac.compare_digest(expected_sig, actual_sig):
+            return None
+        pad = "=" * ((4 - len(body_b64) % 4) % 4)
+        payload_raw = base64.urlsafe_b64decode(body_b64 + pad).decode("utf-8")
+        payload = json.loads(payload_raw)
+    except (ValueError, json.JSONDecodeError, binascii.Error if False else Exception):  # noqa
+        return None
+    uid = payload.get("uid")
+    email = payload.get("email")
+    exp = payload.get("exp")
+    if not uid or not email or not exp:
+        return None
+    # exp 是毫秒
+    try:
+        if int(exp) < int(time.time() * 1000):
+            return None
+    except (TypeError, ValueError):
+        return None
+    if not _safe_ec_uid(str(uid)):
+        return None
+    return {"uid": str(uid), "email": str(email), "exp": int(exp)}
+
+
 def _current_uid() -> str:
     uid = getattr(_user_ctx, "uid", None)
     return uid or ANONYMOUS_FALLBACK_UID
@@ -169,6 +230,12 @@ def _empty_state() -> dict[str, Any]:
         "draftScore": 0,
         "directorDecision": "",
         "humanStyleReport": {},
+        "agentTimeline": [],
+        "revisionAttempts": {},
+        "editorReview": None,
+        "chiefEditorPassed": False,
+        "chiefEditorRequiresUser": False,
+        "lastExportedChapter": 0,
         "updatedAt": datetime.now().isoformat(timespec="seconds"),
     }
 
@@ -370,6 +437,12 @@ def default_state() -> dict[str, Any]:
             {"time": "00:44", "title": "Scene Writer", "text": "分场景生成正文，scene_03 标记为 needs_fix。"},
             {"time": "01:02", "title": "Audit Board", "text": "连续性发现 1 个 blocker，建议局部修订。"},
         ],
+        "agentTimeline": [],
+        "revisionAttempts": {},
+        "editorReview": None,
+        "chiefEditorPassed": False,
+        "chiefEditorRequiresUser": False,
+        "lastExportedChapter": 0,
     }
 
 
@@ -709,6 +782,60 @@ GENRE_DEEP_CONFIGS: dict[str, dict[str, Any]] = {
             ["认知反转", "章末惊点", "案卷里出现主角自己的名字。"],
         ],
     },
+    "rebirth": {
+        "label": "重生/穿越",
+        "coreMechanism": "前世先知 + 命运分岔 + 蝴蝶代价",
+        "openingRecipe": ["回到关键节点", "确认重生身份", "先知扭转第一件事", "蝴蝶效应初现"],
+        "payoffEngine": ["每章兑现一次先知优势", "每次改命要付出代价", "旧仇旧友逐步重新登场"],
+        "mustHave": ["前世记忆锚点", "改命动作", "蝴蝶效应", "未知变量"],
+        "avoid": ["先知一直无敌", "前世细节全靠回忆灌输", "改命无成本"],
+        "firstThree": [
+            "第 1 章：主角回到命运分岔点，确认重生并避开第一次悲剧。",
+            "第 2 章：先用一次先知优势小赚一把，引来不该这么早出现的人。",
+            "第 3 章：发现这一世已经偏离前世剧本，未知变量上场。",
+        ],
+        "sceneTemplates": [
+            ["回到分岔点", "重生确认", "主角在熟悉场景里发现一切倒带。"],
+            ["先知出手", "信息差爽点", "用前世知识抢下第一份关键资源/机会。"],
+            ["蝴蝶效应", "章末钩子", "本不该出现的人提前登场，剧本开始走偏。"],
+        ],
+    },
+    "romance": {
+        "label": "情感言情",
+        "coreMechanism": "误会绑定 + 拉扯升级 + 现实壁垒",
+        "openingRecipe": ["意外相遇/被迫绑定", "立场对立", "第一次破防", "章末关系升级"],
+        "payoffEngine": ["每章推进一次情感节点", "误会要逐步揭开", "外部壁垒和内部撕扯并行"],
+        "mustHave": ["双方动机", "误会/契约", "情绪节点", "现实阻力"],
+        "avoid": ["全靠人设强行甜", "误会拖太久", "配角全工具人"],
+        "firstThree": [
+            "第 1 章：男女主角在意外或协议中绑定，立场截然对立。",
+            "第 2 章：第一次正面冲突，一方率先破防露出真实动机。",
+            "第 3 章：外部压力压上来，被迫站到同一边，关系阶段升级。",
+        ],
+        "sceneTemplates": [
+            ["误会相遇", "绑定开场", "两人在不该相遇的场合被命运绑到一起。"],
+            ["情绪破防", "拉扯爽点", "一次冲突里有人先撑不住，亮出软处。"],
+            ["外部施压", "章末升级", "现实壁垒或第三人介入逼迫关系前进一步。"],
+        ],
+    },
+    "scifi": {
+        "label": "科幻/星际",
+        "coreMechanism": "硬设定钩子 + 旧时代谜团 + 三方势力博弈",
+        "openingRecipe": ["边境/废墟开场", "唤醒旧时代造物", "失效协议触发", "章末追兵到位"],
+        "payoffEngine": ["设定细节要兑现", "每章解开一层旧谜", "三方势力轮流加压"],
+        "mustHave": ["科技规则", "旧时代遗产", "追兵/通缉", "认知盲区"],
+        "avoid": ["设定只放嘴上不用", "AI/外星人当万能金手指", "战斗只比装备"],
+        "firstThree": [
+            "第 1 章：主角在边境/废舰唤醒一段旧时代信号，触发失效协议。",
+            "第 2 章：协议带来第一份资源，也引来星际通缉或势力关注。",
+            "第 3 章：主角发现协议指向的真相比想象大，三方势力开始下场。",
+        ],
+        "sceneTemplates": [
+            ["边境开场", "硬设定铺垫", "主角在废舰、废土或边境星区谋生。"],
+            ["旧造物觉醒", "设定钩子", "一段旧 AI/旧文件/旧装置在主角面前激活。"],
+            ["势力下场", "章末追兵", "通缉令、舰队或暗杀者抵达，节奏拉满。"],
+        ],
+    },
 }
 
 
@@ -722,27 +849,33 @@ STORY_LENGTH_CONFIGS: dict[str, dict[str, Any]] = {
         "label": "短篇小说",
         "targetWords": 50000,
         "targetChapters": 12,
-        "chapterWords": 3500,
+        "chapterWords": 2700,
+        "minChapterWordsNoPunct": 2000,
+        "maxChapterWordsNoPunct": 2500,
         "outlineChapterCount": 12,
-        "planningRule": "短篇必须围绕单一主线推进，前 3 章入局，中段升级，最后 3 章集中回收核心伏笔并完成结局。",
+        "planningRule": "短篇必须围绕单一主线推进，前 3 章入局，中段升级，最后 3 章集中回收核心伏笔并完成结局。每章正文不含标点字数硬性落在 2000-2500 字之间，禁止低于 2000 或超过 2500。",
     },
     "medium": {
         "key": "medium",
         "label": "中篇小说",
         "targetWords": 200000,
         "targetChapters": 80,
-        "chapterWords": 2500,
+        "chapterWords": 2700,
+        "minChapterWordsNoPunct": 2000,
+        "maxChapterWordsNoPunct": 2500,
         "outlineChapterCount": 12,
-        "planningRule": "中篇保留 2-3 个单元，主线要清晰，避免铺太多长期坑，80 章内完成阶段性大结局。",
+        "planningRule": "中篇保留 2-3 个单元，主线要清晰，避免铺太多长期坑，80 章内完成阶段性大结局。每章正文不含标点字数硬性落在 2000-2500 字之间，禁止低于 2000 或超过 2500。",
     },
     "long": {
         "key": "long",
         "label": "长篇连载",
         "targetWords": 1000000,
         "targetChapters": 400,
-        "chapterWords": 2500,
+        "chapterWords": 2700,
+        "minChapterWordsNoPunct": 2000,
+        "maxChapterWordsNoPunct": 2500,
         "outlineChapterCount": 10,
-        "planningRule": "长篇按连载节奏设计多单元升级、势力扩张和长期伏笔，前 10 章重点完成卖点验证和追读钩子。",
+        "planningRule": "长篇按连载节奏设计多单元升级、势力扩张和长期伏笔，前 10 章重点完成卖点验证和追读钩子。每章正文不含标点字数硬性落在 2000-2500 字之间，禁止低于 2000 或超过 2500。",
     },
 }
 
@@ -1125,6 +1258,223 @@ def _safe_int(value: Any, fallback: int = 0) -> int:
         return fallback
 
 
+# ========================================================================
+# 题材成书 · 打磨循环 (W1)
+# ========================================================================
+
+# 可改字段白名单
+IDEA_EDITABLE_TEXT_FIELDS = {
+    "selectedSynopsis",
+    "sellingPoint",
+    "worldSetting",
+    "mainConflict",
+    "firstGoal",
+    "premise",
+}
+IDEA_REGENERATABLE_ARRAY_FIELDS = {
+    "recommendedTitles",
+    "recommendedProtagonists",
+    "synopsisOptions",
+}
+
+# 字段中文标签
+IDEA_FIELD_LABELS = {
+    "selectedSynopsis": "简介",
+    "sellingPoint": "核心卖点",
+    "worldSetting": "世界观",
+    "mainConflict": "主冲突",
+    "firstGoal": "第一章目标",
+    "premise": "题材前提",
+    "recommendedTitles": "推荐书名",
+    "recommendedProtagonists": "主角名候选",
+    "synopsisOptions": "简介候选",
+    "genre": "流派",
+}
+
+
+def ensure_idea_polish_fields(idea: dict[str, Any]) -> dict[str, Any]:
+    """保证 pendingIdeaDraft 上有 revisions / confirmed 字段。"""
+    if idea is None:
+        return idea
+    if not isinstance(idea.get("revisions"), list):
+        idea["revisions"] = []
+    if "confirmed" not in idea:
+        idea["confirmed"] = False
+    if not isinstance(idea.get("_revisionCounter"), int):
+        idea["_revisionCounter"] = 0
+    return idea
+
+
+def _make_revision_entry(idea: dict[str, Any], field: str, before: Any, after: Any, source: str, instruction: str = "") -> dict[str, Any]:
+    idea["_revisionCounter"] = int(idea.get("_revisionCounter", 0)) + 1
+    rev = {
+        "id": f"rev-{int(time.time())}-{idea['_revisionCounter']}",
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "field": field,
+        "before": deepcopy(before),
+        "after": deepcopy(after),
+        "source": source,
+        "instruction": instruction or "",
+    }
+    return rev
+
+
+def _append_revision(idea: dict[str, Any], field: str, before: Any, after: Any, source: str, instruction: str = "") -> dict[str, Any]:
+    ensure_idea_polish_fields(idea)
+    rev = _make_revision_entry(idea, field, before, after, source, instruction)
+    idea["revisions"].append(rev)
+    return rev
+
+
+def _refine_prompt_for_field(field: str) -> str:
+    base = (
+        "你是中文网文产品级策划。只输出 JSON，不要 Markdown。"
+        "请根据用户的打磨指令改写指定字段，保留原意中合理的部分，按指令调整细节。"
+        '输出格式严格为 {"value": "..."}，不要任何额外字段。'
+    )
+    extra = {
+        "selectedSynopsis": "字段是「简介」，控制在 80-200 字，要点明主角处境、核心矛盾、爽点钩子。",
+        "sellingPoint": "字段是「核心卖点」，一两句话讲清楚这本书最独特的钩子。",
+        "worldSetting": "字段是「世界观」，简明描述设定底层规则、不要堆砌名词。",
+        "mainConflict": "字段是「主冲突」，一句话讲清主角对抗的核心势力或难题。",
+        "firstGoal": "字段是「第一章目标」，给出第一章必须完成的钩子和情节兑现。",
+        "premise": "字段是「题材前提」，一两句话讲清整本书的核心立意。",
+    }
+    return base + (extra.get(field) or "")
+
+
+def refine_idea_field(idea: dict[str, Any], field: str, instruction: str) -> str:
+    """调 LLM 把指定字段按指令改写，返回新值。失败抛 RuntimeError。"""
+    if field not in IDEA_EDITABLE_TEXT_FIELDS:
+        raise ValueError(f"字段 {field} 不支持 AI 打磨")
+    instruction = str(instruction or "").strip()
+    if not instruction:
+        raise ValueError("请填写打磨指令")
+    current_value = str(idea.get(field) or "").strip()
+    system = _refine_prompt_for_field(field)
+    user = json.dumps(
+        {
+            "topic": idea.get("topic", ""),
+            "genre": idea.get("genre", ""),
+            "selectedTitle": idea.get("selectedTitle", ""),
+            "selectedProtagonist": idea.get("selectedProtagonist", ""),
+            "field": field,
+            "fieldLabel": IDEA_FIELD_LABELS.get(field, field),
+            "currentValue": current_value,
+            "instruction": instruction,
+        },
+        ensure_ascii=False,
+    )
+    try:
+        data = chat_json(system, user, temperature=0.7, timeout=45, agent="ideation")
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"打磨失败：{exc}") from exc
+    new_value = data.get("value")
+    if not isinstance(new_value, str) or not new_value.strip():
+        raise RuntimeError("打磨失败：模型未返回有效内容")
+    return new_value.strip()
+
+
+def _regenerate_array_field(idea: dict[str, Any], field: str, instruction: str) -> list[Any]:
+    """整组重生成数组字段(标题/主角/简介候选)。"""
+    if field not in IDEA_REGENERATABLE_ARRAY_FIELDS:
+        raise ValueError(f"字段 {field} 不支持整组重生成")
+    instruction = str(instruction or "").strip()
+    base = (
+        "你是中文网文产品级策划。只输出 JSON，不要 Markdown。"
+        "请根据现有题材和用户的打磨指令，重新给出一组候选。"
+    )
+    spec = {
+        "recommendedTitles": '严格输出 {"value": ["标题1", "标题2", "标题3"]}，每个标题 4-10 字。',
+        "recommendedProtagonists": '严格输出 {"value": ["主角1", "主角2", "主角3"]}，每个 2-4 字，符合题材调性。',
+        "synopsisOptions": (
+            '严格输出 {"value": [{"style": "风格1", "text": "简介正文"}, {"style": "风格2", "text": "..."}]} '
+            "至少 2 条，最多 3 条，每条简介 80-200 字。"
+        ),
+    }
+    system = base + spec[field]
+    user = json.dumps(
+        {
+            "topic": idea.get("topic", ""),
+            "genre": idea.get("genre", ""),
+            "selectedTitle": idea.get("selectedTitle", ""),
+            "selectedProtagonist": idea.get("selectedProtagonist", ""),
+            "field": field,
+            "current": idea.get(field, []),
+            "instruction": instruction or "请重新给出一组更精彩的候选。",
+        },
+        ensure_ascii=False,
+    )
+    try:
+        data = chat_json(system, user, temperature=0.85, timeout=60, agent="ideation")
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"重生成失败：{exc}") from exc
+    value = data.get("value")
+    if not isinstance(value, list) or not value:
+        raise RuntimeError("重生成失败：模型未返回有效数组")
+    return value
+
+
+def regenerate_all_candidates(idea: dict[str, Any]) -> dict[str, Any]:
+    """一次 LLM 调用同时重生成 标题/主角/简介 3 组候选,用于改判流派后同步候选。"""
+    system = (
+        "你是中文网文产品级策划。只输出 JSON,不要 Markdown。"
+        "根据当前题材、流派和深度配置,重新生成与流派调性一致的标题/主角名/简介候选。"
+        '严格输出 {"recommendedTitles": ["t1","t2","t3"], '
+        '"recommendedProtagonists": ["n1","n2","n3"], '
+        '"synopsisOptions": [{"style":"风格1","text":"..."}, {"style":"风格2","text":"..."}]} '
+        "标题 4-10 字;主角名 2-4 字,符合流派调性;简介 2-3 条,每条 80-200 字,要点明主角处境、核心矛盾、爽点钩子。"
+    )
+    user = json.dumps(
+        {
+            "topic": idea.get("topic", ""),
+            "genre": idea.get("genre", ""),
+            "genreLabel": idea.get("genreLabel", ""),
+            "deepRules": idea.get("deepRules", {}),
+            "selectedTitle": idea.get("selectedTitle"),
+            "selectedProtagonist": idea.get("selectedProtagonist"),
+            "currentTitles": idea.get("recommendedTitles", []),
+            "currentProtagonists": idea.get("recommendedProtagonists", []),
+            "currentSynopses": idea.get("synopsisOptions", []),
+        },
+        ensure_ascii=False,
+    )
+    try:
+        data = chat_json(system, user, temperature=0.85, timeout=90, agent="ideation")
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"同步候选失败:{exc}") from exc
+    titles = data.get("recommendedTitles") or []
+    heroes = data.get("recommendedProtagonists") or []
+    synopses = data.get("synopsisOptions") or []
+    if not isinstance(titles, list) or not titles:
+        raise RuntimeError("同步候选失败:模型未返回标题数组")
+    if not isinstance(heroes, list) or not heroes:
+        raise RuntimeError("同步候选失败:模型未返回主角候选数组")
+    if not isinstance(synopses, list) or not synopses:
+        raise RuntimeError("同步候选失败:模型未返回简介数组")
+    return {
+        "recommendedTitles": titles,
+        "recommendedProtagonists": heroes,
+        "synopsisOptions": synopses,
+    }
+
+
+def _revert_field_value(idea: dict[str, Any], revision_id: str) -> tuple[str, Any, Any]:
+    """根据 revisionId 把字段回到对应历史。返回 (field, current_value_before_revert, target_value)。"""
+    target: dict[str, Any] | None = None
+    for rev in idea.get("revisions", []):
+        if rev.get("id") == revision_id:
+            target = rev
+            break
+    if target is None:
+        raise ValueError("找不到该修订记录")
+    field = target["field"]
+    # 回退策略:取目标 revision 的 before 值(即「这次修订前」的样子)。
+    target_value = target["before"]
+    current_value = idea.get(field)
+    return field, current_value, target_value
+
+
 def new_project_id() -> str:
     return f"proj_{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
 
@@ -1174,12 +1524,9 @@ def chapter_outline_for(outlines: list[dict[str, Any]], chapter_number: int) -> 
 
 def build_chapter_rows(outlines: list[dict[str, Any]], active_number: int) -> list[dict[str, Any]]:
     max_outline = max([_safe_int(item.get("chapter"), 0) for item in outlines] or [active_number + 2])
-    if active_number <= 1:
-        start = 1
-        end = min(max_outline, 3)
-    else:
-        start = max(1, active_number - 1)
-        end = min(max_outline, active_number + 2)
+    # 起点恒为 1，让已完成章节始终留在左侧栏(避免「写到第 4 章后第 1 章消失」)
+    start = 1
+    end = min(max_outline, max(active_number + 2, 3))
     rows = []
     for number in range(start, end + 1):
         outline = chapter_outline_for(outlines, number)
@@ -1218,8 +1565,15 @@ def build_chapter_scenes(genre: str, protagonist: str, chapter_number: int, outl
         ("章末钩子", "强钩子", reader_hook),
     ]
     selected = templates[: scene_count - 1] + [templates[-1]]
+    # 目标：全章 2000-2500 字不含标点 ≈ 2350-2950 字含标点。
+    # 按场景数平均分配 ~2700 字含标点，章末钩子场景多一点（小高潮）。
+    chapter_target_with_punct = 2700
+    base_per_scene = chapter_target_with_punct // scene_count
+    climax_bonus = chapter_target_with_punct - base_per_scene * scene_count + 80
     scenes = []
     for index, (scene_title, scene_type, summary) in enumerate(selected, start=1):
+        is_last = index == scene_count
+        scene_words = base_per_scene + (climax_bonus if is_last else 0)
         content = (
             f"{protagonist}还没来得及从上一章的余波里喘口气。\n\n"
             f"新的问题已经摆在眼前。\n\n"
@@ -1232,7 +1586,7 @@ def build_chapter_scenes(genre: str, protagonist: str, chapter_number: int, outl
                 "number": index,
                 "title": scene_title,
                 "type": scene_type,
-                "words": 520 + index * 80,
+                "words": scene_words,
                 "status": "draft",
                 "summary": summary,
                 "tags": [f"第{chapter_number}章", config["label"]],
@@ -1242,18 +1596,480 @@ def build_chapter_scenes(genre: str, protagonist: str, chapter_number: int, outl
     return scenes
 
 
+def plan_chapter_with_llm(state: dict[str, Any], chapter_number: int) -> bool:
+    """章节正文生成前调一次,把粗大纲展开成本章 scene 骨架。
+
+    成功返回 True 并把 LLM 出的 scenes 落到 state['plan']['scenes'],
+    供 build_chapter_scenes 或下游写手参考;失败返回 False,沿用默认骨架。
+    """
+    outlines = state.get("outline", {}).get("chapterOutlines") or []
+    # outline 里的章号字段历史上有 chapter / chapterNumber / number 三种叫法,兼容
+    def _outline_num(c):
+        for k in ("chapterNumber", "chapter", "number", "index"):
+            v = _safe_int(c.get(k), -1)
+            if v > 0:
+                return v
+        return -1
+    outline = next(
+        (c for c in outlines if _outline_num(c) == chapter_number),
+        None,
+    )
+    if not outline:
+        # 兜底:位置法,outline 第 N-1 项对应第 N 章
+        if outlines and 0 < chapter_number <= len(outlines):
+            outline = outlines[chapter_number - 1]
+    if not outline:
+        return False
+    if not get_llm_config("planner").configured:
+        return False
+    _log_agent(state, "planner", "running", chapter=chapter_number,
+               message="展开本章场景骨架")
+    canon = state.get("memory", {}).get("canon", [])
+    archive = state.get("chapterArchive", [])
+    system = (
+        "你是中文网文的章节规划编辑,以七猫/起点爆款为标尺。只输出 JSON,不要 markdown 或解释。"
+        "把给定大纲展开成 3-5 个场景骨架,严格输出:"
+        "{\"scenes\":[{\"title\":string,\"type\":string,\"beat\":string,"
+        "\"purpose\":string,\"wordTarget\":number,\"hookAtEnd\":boolean,"
+        "\"dialogueShare\":number,\"hookType\":string}]}。"
+        "\n规则:"
+        "\n- 总 wordTarget≈2700(含标点);最后一个场景 hookAtEnd 必须为 true;"
+        "\n- 每个场景的 dialogueShare 是该场景目标对话段占比,范围 0.20-0.55,"
+        "全章平均不低于 0.30(爆款 P50);战斗/突破场景可降到 0.20,争吵/对峙必须 ≥ 0.40;"
+        "\n- 最后一个场景的 hookType 必须从这 10 类选一个:'强敌出场'/'真相揭露'/"
+        "'主角抉择'/'美女登场'/'机缘出现'/'危机迫近'/'误会爆发'/'身份反转'/'重逢相遇'/'抉择两难';"
+        "\n- beat 写本场景的剧情节拍(20-50 字);purpose 写本场景对全章的功能;"
+        "\n场景节奏:开场承接 → 行动推进 → 代价 → 反转/爽点 → 章末钩子。"
+    )
+    user = json.dumps({
+        "chapter": outline,
+        "canon": canon[-10:],
+        "previousChapters": [
+            {"number": c.get("number"), "title": c.get("title")}
+            for c in archive[-3:]
+        ],
+        "genre": state.get("project", {}).get("genre", ""),
+        "genreLabel": state.get("project", {}).get("genreLabel", ""),
+        "readerPromise": state.get("plan", {}).get("readerPromise", ""),
+        "mustAdvance": state.get("plan", {}).get("mustAdvance", ""),
+    }, ensure_ascii=False)
+    try:
+        data = chat_json(system, user, temperature=0.6, timeout=60, agent="planner")
+    except Exception as exc:  # noqa: BLE001
+        _log_agent(state, "planner", "failed", chapter=chapter_number, message=str(exc)[:200])
+        return False
+    scenes = data.get("scenes") or []
+    if not scenes:
+        _log_agent(state, "planner", "failed", chapter=chapter_number, message="模型未返回场景")
+        return False
+    state.setdefault("plan", {})["scenes"] = scenes
+    # 把 planner 出的场景元数据回填到 state["scenes"], 让 scene_writer 据此写正文
+    current_scenes = state.get("scenes") or []
+    for index, sc in enumerate(scenes):
+        if index >= len(current_scenes):
+            break
+        target = current_scenes[index]
+        if sc.get("title"):
+            target["title"] = str(sc["title"])
+        if sc.get("type"):
+            target["type"] = str(sc["type"])
+        if sc.get("beat") or sc.get("purpose"):
+            target["summary"] = str(sc.get("beat") or sc.get("purpose"))
+        wt = _safe_int(sc.get("wordTarget"), 0)
+        if wt > 0:
+            target["words"] = wt
+        # 新增:dialogueShare / hookAtEnd / hookType 透传给写手
+        if isinstance(sc.get("dialogueShare"), (int, float)):
+            target["dialogueShare"] = max(0.0, min(1.0, float(sc["dialogueShare"])))
+        if "hookAtEnd" in sc:
+            target["hookAtEnd"] = bool(sc.get("hookAtEnd"))
+        if sc.get("hookType"):
+            target["hookType"] = str(sc["hookType"])
+        target["status"] = "draft"
+    _log_agent(state, "planner", "done", chapter=chapter_number,
+               message=f"展开 {len(scenes)} 个场景骨架")
+    return True
+
+
+def settle_truth_with_llm(state: dict[str, Any], chapter_number: int, chapter_title: str) -> tuple[bool, str]:
+    """truth agent 真接 LLM:从已生成章节正文里抽取本章新增的事实/伏笔/世界/角色状态。
+
+    返回 (used, note)。失败/未配置则返回 (False, 原因),由调用方决定回退策略。
+    """
+    if not get_llm_config("truth").configured:
+        return False, "未配置 truth 模型,沿用占位归档"
+    scenes = state.get("scenes") or []
+    scene_text = "\n\n".join(s.get("content", "") for s in scenes if s.get("content"))
+    if not scene_text.strip():
+        return False, "正文为空,跳过 LLM 归档"
+    _log_agent(state, "truth", "running", chapter=chapter_number,
+               message="从正文抽取新增 canon")
+    system = (
+        "你是中文网文的真相归档编辑。只输出 JSON,不要解释。"
+        "从给定章节正文里抽取本章【新增】的内容,严格输出 schema:"
+        "{\"newFacts\":[{\"title\":string,\"text\":string}],"
+        "\"newForeshadowing\":[{\"title\":string,\"note\":string}],"
+        "\"newWorldRules\":[{\"title\":string,\"text\":string}],"
+        "\"characterStateChanges\":[{\"character\":string,\"from\":string,\"to\":string}]}。"
+        "只抽取正文明确发生过的事件/规则,不要推测或编造。"
+        "已存在的 canon 标题不要重复。"
+    )
+    existing_canon = state.get("memory", {}).get("canon", [])
+    user = json.dumps({
+        "chapterNumber": chapter_number,
+        "chapterTitle": chapter_title,
+        "text": scene_text[:8000],
+        "existingCanonTitles": [c.get("title") for c in existing_canon[-30:]],
+    }, ensure_ascii=False)
+    try:
+        data = chat_json(system, user, temperature=0.3, timeout=60, agent="truth")
+    except Exception as exc:  # noqa: BLE001
+        _log_agent(state, "truth", "failed", chapter=chapter_number, message=str(exc)[:200])
+        return False, f"truth LLM 失败:{exc}"
+    memory = state.setdefault("memory", {"canon": [], "lore": [], "stakes": []})
+    canon = memory.setdefault("canon", [])
+    existing_titles = {c.get("title") for c in canon}
+    new_facts = data.get("newFacts") or []
+    added_facts = 0
+    for fact in new_facts:
+        if not isinstance(fact, dict):
+            continue
+        title = str(fact.get("title") or "").strip()
+        text = str(fact.get("text") or "").strip()
+        if not title or title in existing_titles:
+            continue
+        canon.append({"title": title, "text": text})
+        existing_titles.add(title)
+        added_facts += 1
+    new_fore = data.get("newForeshadowing") or []
+    memory.setdefault("foreshadowing", []).extend(
+        [f for f in new_fore if isinstance(f, dict) and f.get("title")]
+    )
+    new_world = data.get("newWorldRules") or []
+    memory.setdefault("worldRules", []).extend(
+        [w for w in new_world if isinstance(w, dict) and w.get("title")]
+    )
+    char_changes = data.get("characterStateChanges") or []
+    memory.setdefault("characterArcs", []).extend(
+        [c for c in char_changes if isinstance(c, dict) and c.get("character")]
+    )
+    note = f"+{added_facts} 事实 / +{len(new_fore)} 伏笔 / +{len(new_world)} 世界规则 / +{len(char_changes)} 角色变更"
+    _log_agent(state, "truth", "done", chapter=chapter_number, message=note)
+    return True, note
+
+
+def chief_editor_review(state: dict[str, Any], chapter_number: int) -> dict[str, Any] | None:
+    """小说总编 agent:audit 之后调一次,给章节打分 + 决定 approve/revise/reject。
+
+    返回 dict {score, passed, issues, action, editorNotes} 或 None(失败)。
+    """
+    if not get_llm_config("chief_editor").configured:
+        # 未配置 LLM: 用本地规则做基本字数+去 AI 味检查,确保流程可走
+        _log_agent(state, "chief_editor", "running", chapter=chapter_number,
+                   message="本地规则审核(未配置 LLM)")
+        text = "\n\n".join(s.get("content", "") for s in state.get("scenes", []))
+        no_punct = count_chars_no_punct(text)
+        target_min = chapter_min_words_no_punct(state)
+        target_max = chapter_max_words_no_punct(state)
+        de_ai = compute_de_ai_metrics(text)
+        issues = []
+        if no_punct < target_min:
+            issues.append({"severity": "blocker", "category": "字数",
+                           "text": f"不含标点 {no_punct} 字,低于平台底线 {target_min} 字",
+                           "suggestion": "扩写主要场景,增加细节描写和动作"})
+        elif no_punct > target_max:
+            issues.append({"severity": "minor", "category": "字数",
+                           "text": f"不含标点 {no_punct} 字,超过推荐上限 {target_max} 字",
+                           "suggestion": "压缩冗余描写"})
+        if not de_ai.get("has_chapter_hook"):
+            issues.append({"severity": "blocker", "category": "去AI味-章末钩子",
+                           "text": f"末段「{de_ai['last_para_preview']}」无明显钩子",
+                           "suggestion": "末段加疑问/惊叹/省略号或转折词,留下未解事件"})
+        if de_ai.get("single_sent_para_ratio", 0) > 0.70:
+            issues.append({"severity": "major", "category": "去AI味-段落过碎",
+                           "text": f"单句成段率 {de_ai['single_sent_para_ratio']:.0%}",
+                           "suggestion": "合并相邻短句,目标让 30% 以上段落有 2-4 个句子"})
+        if de_ai.get("dialog_para_ratio", 0) < 0.25:
+            issues.append({"severity": "major", "category": "去AI味-对话稀少",
+                           "text": f"对话段比例 {de_ai['dialog_para_ratio']:.0%} 过低",
+                           "suggestion": "在主要场景加 4-6 句直接对白"})
+        if de_ai.get("ai_blacklist_total", 0) >= 3:
+            issues.append({"severity": "major", "category": "去AI味-雷区词",
+                           "text": f"AI 雷区词命中 {de_ai['ai_blacklist_total']} 次",
+                           "suggestion": "替换为具体动作或感官描写"})
+        blocker = sum(1 for i in issues if i["severity"] == "blocker")
+        major = sum(1 for i in issues if i["severity"] == "major")
+        passed = blocker == 0 and major < 2
+        score = 90 - blocker * 25 - major * 10
+        result = {
+            "score": max(score, 30),
+            "passed": passed,
+            "issues": issues,
+            "action": "approve" if passed else "revise",
+            "editorNotes": "; ".join(i["suggestion"] for i in issues) or "本地规则通过",
+            "deAiMetrics": de_ai,
+            "model": "local-rule",
+        }
+        _log_agent(state, "chief_editor", "done", chapter=chapter_number,
+                   message=f"本地审核 {result['score']}/100 → {result['action']}")
+        return result
+    _log_agent(state, "chief_editor", "running", chapter=chapter_number,
+               message="审核章节质量")
+    scenes = state.get("scenes") or []
+    text = "\n\n".join(s.get("content", "") for s in scenes if s.get("content"))
+    no_punct = count_chars_no_punct(text)
+    target_min = chapter_min_words_no_punct(state)
+    target_max = chapter_max_words_no_punct(state)
+    de_ai = compute_de_ai_metrics(text)
+    system = (
+        "你是中文网文小说总编,以七猫/起点/番茄爆款为标尺。只输出 JSON,不要 Markdown 或解释。"
+        "重点检查【去 AI 味】结构问题,然后才是内容问题。"
+        f"\n硬性红线(任一命中即 blocker,必须打回重写):"
+        f"\n  - 不含标点字数必须在 {target_min}-{target_max} 之间"
+        f"\n  - 章末必须有钩子(疑问/惊叹/省略号/'竟然/不料/突然/猛地/下一刻' 等)"
+        f"\n  - 单句成段率不得超过 70%(段落必须能合并的就合并,不要每句一段)"
+        f"\n  - 含引号对话段比例不得低于 25%(角色必须真说话,不要纯叙述)"
+        "\n二级问题(major,2 次以上即 revise):"
+        "\n  - AI 雷区词命中 ≥3:然而/与此同时/在这一刻/不可否认/令人/不由得/不禁/油然而生/心头一震/宛若/正如 等"
+        "\n  - 升华/比喻句式 ≥2:'并非...而是'/'不仅...更...'/'宛若...一般' 等"
+        "\n  - 平均句长 <14 字(过碎)或 >35 字(过长)"
+        "\n  - 形容词堆砌/空泛情绪命名词过多"
+        "\n三级问题(minor):字数±5%、流派调性微调、canon 边角矛盾"
+        "\n严格输出 schema:"
+        "\n{\"score\":number(0-100),\"passed\":boolean,"
+        "\"issues\":[{\"severity\":\"blocker\"|\"major\"|\"minor\",\"category\":string,"
+        "\"text\":string,\"suggestion\":string}],"
+        "\"action\":\"approve\"|\"revise\"|\"reject\",\"editorNotes\":string}"
+        "\n判定:有任何 blocker → revise;有 ≥2 major → revise;只有 minor 且 score≥75 → approve;"
+        "彻底跑题/canon 严重冲突 → reject。"
+        "editorNotes 必须给写手【可执行的句级修改指引】,例如"
+        "'把第 2 段三个短句合并成一段,加入主角的反问对话',不少于 80 字。"
+    )
+    user = json.dumps({
+        "chapterNumber": chapter_number,
+        "chapterTitle": state["project"].get("chapterTitle"),
+        "noPunctCharCount": no_punct,
+        "requiredRange": f"{target_min}-{target_max}",
+        "deAiMetrics": de_ai,
+        "deAiBaselineQimao": {
+            "sent_avg_p50": 18.4,
+            "single_sent_para_ratio_p50": 0.62,
+            "single_sent_para_ratio_p75": 0.69,
+            "dialog_para_ratio_p25": 0.27,
+            "dialog_para_ratio_p50": 0.37,
+            "chapter_hook_coverage": 0.69,
+            "ai_blacklist_total_p50": 1,
+        },
+        "text": text[:8000],
+        "genre": state.get("project", {}).get("genre", ""),
+        "genreLabel": state.get("project", {}).get("genreLabel", ""),
+        "canon": (state.get("memory", {}).get("canon") or [])[-10:],
+        "readerPromise": state.get("plan", {}).get("readerPromise", ""),
+        "mustAdvance": state.get("plan", {}).get("mustAdvance", ""),
+    }, ensure_ascii=False)
+    try:
+        data = chat_json(system, user, temperature=0.4, timeout=90, agent="chief_editor")
+    except Exception as exc:  # noqa: BLE001
+        err_msg = str(exc)[:300]
+        state["lastChiefEditorError"] = err_msg
+        _log_agent(state, "chief_editor", "failed", chapter=chapter_number, message=err_msg[:200])
+        return None
+    state.pop("lastChiefEditorError", None)
+
+    # --- 后处理:用 metrics 强制注入硬规则 issue(LLM 偶尔会漏报)---
+    issues = list(data.get("issues") or [])
+
+    def _has_issue(category_kw: str) -> bool:
+        return any(category_kw in (i.get("text", "") + i.get("category", "") + i.get("suggestion", ""))
+                   for i in issues)
+
+    if not de_ai.get("has_chapter_hook") and not _has_issue("钩子"):
+        issues.append({
+            "severity": "blocker",
+            "category": "去AI味-章末钩子",
+            "text": f"末段「{de_ai['last_para_preview']}」无明显钩子",
+            "suggestion": "改写末段,加疑问句/惊叹/省略号或'竟然/不料/突然/猛地'等转折词,留下未解事件",
+        })
+    if de_ai.get("single_sent_para_ratio", 0) > 0.70 and not _has_issue("单句成段"):
+        issues.append({
+            "severity": "major",
+            "category": "去AI味-段落过碎",
+            "text": f"单句成段率 {de_ai['single_sent_para_ratio']:.0%},超过爆款 P75 = 69%",
+            "suggestion": "把相邻的短句合并成长段落,目标让 30% 以上的段落包含 2-4 个句子",
+        })
+    if de_ai.get("dialog_para_ratio", 0) < 0.25 and not _has_issue("对话"):
+        issues.append({
+            "severity": "major",
+            "category": "去AI味-对话稀少",
+            "text": f"含引号对话段比例 {de_ai['dialog_para_ratio']:.0%},低于爆款 P25 = 27%",
+            "suggestion": "在主要场景里加 4-6 句直接对白(用中文双引号),让主角和对手真说话",
+        })
+    if de_ai.get("ai_blacklist_total", 0) >= 3 and not _has_issue("AI 雷区"):
+        hits = ", ".join(f"{k}×{v}" for k, v in list(de_ai["ai_blacklist_hits"].items())[:5])
+        issues.append({
+            "severity": "major",
+            "category": "去AI味-雷区词",
+            "text": f"AI 雷区词命中 {de_ai['ai_blacklist_total']} 次:{hits}",
+            "suggestion": "把所有雷区词替换为具体动作或感官描写,例如'令人窒息'→'她屏住一口气'",
+        })
+    if de_ai.get("sublimation_hits", 0) >= 2 and not _has_issue("升华"):
+        issues.append({
+            "severity": "major",
+            "category": "去AI味-升华句式",
+            "text": f"'并非/不仅/宛若' 等升华句式 {de_ai['sublimation_hits']} 次",
+            "suggestion": "删除作者腔的总结/比喻,改用动作或细节让画面自己说话",
+        })
+
+    # 重新决定 action
+    blocker_count = sum(1 for i in issues if i.get("severity") == "blocker")
+    major_count = sum(1 for i in issues if i.get("severity") == "major")
+
+    # graceful 评分:不论 LLM 给多少分,根据 deviation 算一个理性下限,避免 12/100 这种极端
+    # 字数轻微偏离(<15%)只扣 8 分;严重偏离(<60% 目标)才大幅扣分
+    llm_score = _safe_int(data.get("score"), 60)
+    graceful_floor = 85
+    if no_punct < target_min:
+        deviation = (target_min - no_punct) / max(target_min, 1)
+        if deviation > 0.40:
+            graceful_floor -= 30  # 严重偏低: ≤55
+        elif deviation > 0.15:
+            graceful_floor -= 15  # 中度偏低: ≤70
+        else:
+            graceful_floor -= 8   # 轻度偏低: ≤77
+    elif no_punct > target_max:
+        deviation = (no_punct - target_max) / max(target_max, 1)
+        if deviation > 0.20:
+            graceful_floor -= 10
+        else:
+            graceful_floor -= 5
+    if not de_ai.get("has_chapter_hook"):
+        graceful_floor -= 8
+    if de_ai.get("ai_blacklist_total", 0) >= 3:
+        graceful_floor -= 5
+    # 综合:取 LLM 分和 graceful_floor 的算术平均,避免 LLM 极端打分
+    blended = max(min((llm_score + graceful_floor) // 2, 95), 30)
+    data["score"] = blended
+
+    if blocker_count > 0:
+        data["action"] = "revise"
+        data["passed"] = False
+    elif major_count >= 2:
+        data["action"] = "revise"
+        data["passed"] = False
+    elif blended >= 75 and major_count == 0:
+        # 保留 LLM 的 approve,但要把 minor 之外的修正都做完
+        pass
+
+    data["issues"] = issues
+    data["deAiMetrics"] = de_ai
+    data["model"] = get_llm_config("chief_editor").model
+    _log_agent(state, "chief_editor", "done", chapter=chapter_number,
+               message=f"打分 {data.get('score')}/100 → {data.get('action')} (硬规则:{blocker_count}块/{major_count}主)")
+    return data
+
+
+def rewrite_scenes_with_editor_notes(state: dict[str, Any], notes: str) -> tuple[bool, str]:
+    """按小说总编的批注重写本章场景。复用 scene_writer 路径,但 prompt 注入 editorNotes。"""
+    config = get_llm_config("scene_writer")
+    if not config.configured:
+        return False, "未配置写手模型,无法按批注重写"
+    chapter_number = state["project"]["chapterNumber"]
+    # 提取上一版正文的实测度量,塞给写手做参照
+    prev_text = "\n\n".join(s.get("content", "") for s in state.get("scenes", []) if s.get("content"))
+    prev_de_ai = compute_de_ai_metrics(prev_text)
+    system = (
+        "你是中文网文连载写手,文风以七猫/起点/番茄爆款为标尺。当前任务是【按总编批注重写本章】。"
+        "只输出 JSON,不要 Markdown。"
+        "严格遵循总编批注 editorNotes,针对问题点逐一修正,但保留剧情走向和场景结构。"
+        "\n【字数】每场景 targetWords 指不含标点中文字数,全章 2000-2500 字,严禁低于 2000 或高于 2500。"
+        "\n【去 AI 味结构红线】(必须满足,违反等于本次重写失败):"
+        "\n  1. 末场景结尾必须有钩子:疑问/惊叹/省略号或'竟然/不料/突然/猛地'转折词;"
+        "\n  2. 单句成段率 ≤ 65%:相邻短句要合并;"
+        "\n  3. 含引号对话段比例 ≥ 30%:加入直接对白;"
+        "\n  4. 平均句长 16-25 字。"
+        "\n【AI 雷区词禁用】然而/与此同时/在这一刻/令人/不由得/不禁/深深地/油然而生/心头一震/宛若/正如 等,"
+        "出现即必须改写。"
+        "\n【升华句式禁用】不要'并非...而是'/'不仅...更...'/'宛若...一般'。"
+        "\n请对照上一版的实测 prevDeAiMetrics,把没达标的指标拉回来。"
+    )
+    user = json.dumps({
+        "isRewrite": True,
+        "editorNotes": notes,
+        "prevDeAiMetrics": prev_de_ai,
+        "deAiTargets": {
+            "single_sent_para_ratio_max": 0.65,
+            "dialog_para_ratio_min": 0.30,
+            "sent_avg_min": 16,
+            "sent_avg_max": 25,
+            "ai_blacklist_max": 1,
+            "sublimation_max": 1,
+            "chapter_hook_required": True,
+        },
+        "project": state["project"],
+        "plan": state["plan"],
+        "character": state["characters"]["suHan"],
+        "memory": state["memory"],
+        "hooks": state["hooks"],
+        "scenes": [
+            {
+                "id": scene["id"],
+                "title": scene["title"],
+                "type": scene["type"],
+                "summary": scene["summary"],
+                "previousContent": scene.get("content", ""),
+                "targetWords": min(max(scene.get("words", 700), 400), 1100),
+            }
+            for scene in state["scenes"]
+        ],
+        "required_schema": {
+            "scenes": [{"id": "scene_01", "content": "string"}]
+        },
+    }, ensure_ascii=False)
+    try:
+        data = chat_json(system, user, temperature=0.7, timeout=120, agent="scene_writer")
+    except Exception as exc:  # noqa: BLE001
+        _log_agent(state, "scene_writer", "failed", chapter=chapter_number,
+                   message=f"重写失败:{exc}")
+        return False, f"重写失败:{exc}"
+    returned = data.get("scenes") or []
+    by_id = {item.get("id"): item for item in returned if isinstance(item, dict)}
+    updated = 0
+    for scene in state["scenes"]:
+        item = by_id.get(scene["id"])
+        if not item or not item.get("content"):
+            continue
+        scene["content"] = str(item["content"]).strip()
+        scene["words"] = len(scene["content"])
+        scene["wordsNoPunct"] = count_chars_no_punct(scene["content"])
+        updated += 1
+    if updated == 0:
+        return False, "模型未返回可用重写内容"
+    return True, f"按批注重写 {updated} 个场景"
+
+
 def archive_current_chapter(state: dict[str, Any]) -> None:
     archive = state.setdefault("chapterArchive", [])
     chapter_number = state["project"]["chapterNumber"]
+    scenes_snapshot = deepcopy(state.get("scenes", []))
+    total_chars = sum(len(s.get("content", "")) for s in scenes_snapshot)
+    total_no_punct = sum(
+        count_chars_no_punct(s.get("content", "") or "")
+        for s in scenes_snapshot
+    )
     chapter = {
         "number": chapter_number,
+        "chapterNumber": chapter_number,  # 别名,前端 / 测试脚本统一字段
         "title": state["project"]["chapterTitle"],
-        "scenes": deepcopy(state.get("scenes", [])),
+        "chapterTitle": state["project"]["chapterTitle"],
+        "scenes": scenes_snapshot,
         "draftScore": state.get("draftScore", 0),
+        "editorScore": (state.get("editorReview") or {}).get("score"),
+        "wordCount": total_chars,
+        "charsNoPunct": total_no_punct,
         "truthAfter": state.get("truthAfter", ""),
     }
     for index, existing in enumerate(archive):
-        if existing.get("number") == chapter_number:
+        if existing.get("number") == chapter_number or existing.get("chapterNumber") == chapter_number:
             archive[index] = chapter
             return
     archive.append(chapter)
@@ -1300,6 +2116,9 @@ def prepare_next_chapter(state: dict[str, Any]) -> dict[str, Any]:
         },
     ]
     state["draftScore"] = 0
+    state["chiefEditorPassed"] = False
+    state["chiefEditorRequiresUser"] = False
+    state["editorReview"] = None
     state["scores"] = [
         {"name": "连续性", "score": 0, "reason": f"等待第 {next_number} 章正文"},
         {"name": "读者体验", "score": 0, "reason": "等待正文生成"},
@@ -1373,6 +2192,11 @@ def create_project_state(body: dict[str, Any]) -> dict[str, Any]:
     state["directorDecision"] = "新书已初始化，等待生成第一章计划"
     state["draftScore"] = 0
     state["truthAfter"] = "v1 initialized"
+    state["agentTimeline"] = []
+    state["revisionAttempts"] = {}
+    state["editorReview"] = None
+    state["chiefEditorPassed"] = False
+    state["chiefEditorRequiresUser"] = False
     state["plan"] = {
         "readerPromise": first_goal,
         "mustAdvance": f"{deep['coreMechanism']}；{deep['openingRecipe'][0]}；{deep['openingRecipe'][1]}",
@@ -1583,6 +2407,52 @@ def add_trace(state: dict[str, Any], title: str, text: str) -> None:
     state.setdefault("trace", []).append({"time": now_label(), "title": title, "text": text})
 
 
+# ============================================================
+# Agent 流水线时间线 (agentTimeline)
+# - 每个 agent 在关键路径前后调 _log_agent 写一条记录
+# - 前端拿 state.agentTimeline 渲染流水线可视化
+# - status: idle | running | done | failed | revising | review_required
+# ============================================================
+_AGENT_LABELS = {
+    "ideation": "题材策划",
+    "planner": "章节规划",
+    "scene_writer": "正文写手",
+    "audit": "审计修订",
+    "chief_editor": "小说总编",
+    "truth": "真相归档",
+}
+
+
+def _log_agent(
+    state: dict[str, Any],
+    agent_id: str,
+    status: str,
+    *,
+    message: str = "",
+    chapter: int | None = None,
+    duration_ms: int | None = None,
+) -> None:
+    """统一写入 agent 状态的入口。也顺手 add_trace 一次方便老 UI 看。"""
+    timeline = state.setdefault("agentTimeline", [])
+    entry = {
+        "agent": agent_id,
+        "label": _AGENT_LABELS.get(agent_id, agent_id),
+        "status": status,
+        "ts": now_label(),
+        "message": message,
+        "chapterNumber": chapter,
+    }
+    if duration_ms is not None:
+        entry["duration_ms"] = duration_ms
+    timeline.append(entry)
+    # 长度截断
+    if len(timeline) > 50:
+        del timeline[: len(timeline) - 50]
+    # 同步写 trace,老 UI 仍然能看到
+    chapter_part = f" (第 {chapter} 章)" if chapter else ""
+    add_trace(state, entry["label"], f"[{status}]{chapter_part} {message}".strip())
+
+
 def find_scene(state: dict[str, Any], scene_id: str) -> dict[str, Any] | None:
     for scene in state["scenes"]:
         if scene["id"] == scene_id:
@@ -1623,6 +2493,7 @@ def workflow_meta(state: dict[str, Any]) -> dict[str, Any]:
         {"id": "plan", "label": "生成计划", "done": plan_status in {"generated", "locked"}},
         {"id": "write", "label": "生成正文", "done": state.get("scenes") and not has_draft_scenes(state)},
         {"id": "audit", "label": "审计修订", "done": state.get("draftScore", 0) > 0 and not has_open_issues(state)},
+        {"id": "editor", "label": "总编审核", "done": bool(state.get("chiefEditorPassed"))},
         {"id": "style", "label": "原创表达", "done": style_done_for_current_chapter(state) or "committed" in state.get("truthAfter", "")},
         {"id": "settle", "label": "写入真相", "done": "committed" in state.get("truthAfter", "")},
         {"id": "export", "label": "导出", "done": False},
@@ -1668,6 +2539,22 @@ def workflow_meta(state: dict[str, Any]) -> dict[str, Any]:
             "helperText": "还有影响体验的问题。先做定向修订，再写入真相文件。",
             "steps": steps,
         }
+    if not state.get("chiefEditorPassed") and "committed" not in state.get("truthAfter", ""):
+        if state.get("chiefEditorRequiresUser"):
+            return {
+                "currentStep": "editor",
+                "primaryLabel": "总编打回,请人工决定",
+                "primaryEndpoint": "/api/editor/override",
+                "helperText": "总编两次审核仍不通过。请查看打分卡片和问题清单,人工决定是否放行或继续修改。",
+                "steps": steps,
+            }
+        return {
+            "currentStep": "editor",
+            "primaryLabel": "总编审核章节",
+            "primaryEndpoint": "/api/editor/review",
+            "helperText": "审计已通过,让小说总编对照网文红线再审一次:字数、章末钩子、动机、流派调性、canon 一致性。",
+            "steps": steps,
+        }
     if not style_done_for_current_chapter(state) and "committed" not in state.get("truthAfter", ""):
         return {
             "currentStep": "style",
@@ -1707,7 +2594,31 @@ def public_state(state: dict[str, Any]) -> dict[str, Any]:
         if isinstance(report, dict) and report.get("status") == "done" and not report.get("platformGuide"):
             platform = str(project.get("platform") or "fanqie")
             report["platformGuide"] = PLATFORM_STYLE_GUIDES.get(platform, PLATFORM_STYLE_GUIDES["fanqie"])
+        # 每次 GET 时按当前 active 章节重算左侧章节列表,确保已完成章节不会因历史窗口算法被裁掉
+        try:
+            active_number = _safe_int(project.get("chapterNumber"), 1) or 1
+            outlines = output.get("outline", {}).get("chapterOutlines") or output.get("ideaDraft", {}).get("chapterOutlines") or []
+            if outlines or active_number >= 1:
+                output["chapters"] = build_chapter_rows(outlines, active_number)
+        except Exception:
+            pass
     output["workflow"] = workflow_meta(output)
+    # 导出提醒:已归档章节中尚未导出的数量;到达 5 章触发横幅
+    try:
+        last_exported = int(state.get("lastExportedChapter") or 0)
+        archive = state.get("chapterArchive", []) or []
+        unexported = sorted(
+            [int(c.get("number") or 0) for c in archive if int(c.get("number") or 0) > last_exported]
+        )
+        output["exportReminder"] = {
+            "active": len(unexported) >= 5,
+            "chaptersSinceLastExport": len(unexported),
+            "lastExportedChapter": last_exported,
+            "unexportedChapters": unexported,
+        }
+    except Exception:
+        output["exportReminder"] = {"active": False, "chaptersSinceLastExport": 0,
+                                     "lastExportedChapter": 0, "unexportedChapters": []}
     return output
 
 
@@ -1742,6 +2653,34 @@ def export_markdown(state: dict[str, Any], chapter_number: int | None = None) ->
     return "\n".join(lines).strip() + "\n"
 
 
+def export_chapter_plaintext(state: dict[str, Any], chapter_number: int | None = None) -> str:
+    """纯文本单章导出。无 markdown 语法，适合直接复制到网文平台编辑器。"""
+    _require_active_project(state)
+    project = state["project"]
+    scenes = state["scenes"]
+    title = project["chapterTitle"]
+    number = project["chapterNumber"]
+    if chapter_number is not None and chapter_number != project["chapterNumber"]:
+        archived = next((item for item in state.get("chapterArchive", []) if item.get("number") == chapter_number), None)
+        if archived is None:
+            raise KeyError(f"Chapter archive not found: {chapter_number}")
+        scenes = archived.get("scenes", [])
+        title = archived.get("title") or f"第 {chapter_number} 章"
+        number = chapter_number
+    lines = [
+        f"第 {number} 章 · {title}",
+        f"作品：{project['title']}",
+        "",
+        "",
+    ]
+    for scene in scenes:
+        content = str(scene.get("content") or "").strip()
+        if not content:
+            continue
+        lines.extend([content, ""])
+    return "\n".join(lines).strip() + "\n"
+
+
 def export_book_markdown(state: dict[str, Any]) -> str:
     _require_active_project(state)
     project = state["project"]
@@ -1773,15 +2712,224 @@ def export_book_markdown(state: dict[str, Any]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+def export_book_plaintext(state: dict[str, Any]) -> str:
+    """纯文本全书导出。无 markdown 语法，适合直接复制到网文平台编辑器。"""
+    _require_active_project(state)
+    project = state["project"]
+    chapters = sorted(state.get("chapterArchive", []), key=lambda item: item.get("number", 0))
+    current_number = project["chapterNumber"]
+    if not any(item.get("number") == current_number for item in chapters):
+        chapters.append(
+            {
+                "number": current_number,
+                "title": project["chapterTitle"],
+                "scenes": state.get("scenes", []),
+            }
+        )
+
+    lines = [
+        project["title"],
+        "",
+        f"流派：{project.get('genre', '')} · 平台：{project.get('platform', '')} · 篇幅：{project.get('storyLengthLabel', '未设置')}",
+        "",
+    ]
+    if project.get("synopsis"):
+        lines.extend(["【作品简介】", "", str(project["synopsis"]).strip(), "", ""])
+    for chapter in chapters:
+        lines.extend(["", f"第 {chapter['number']} 章 · {chapter['title']}", "", ""])
+        for scene in chapter.get("scenes", []):
+            content = str(scene.get("content") or "").strip()
+            if content:
+                lines.extend([content, ""])
+    return "\n".join(lines).strip() + "\n"
+
+
+_CN_PUNCT = set("，。！？、；：“”‘’《》「」『』（）()【】[]——……·~～·.,!?:;\"'\\/\n\r\t 　")
+
+
+def count_chars_no_punct(text: str) -> int:
+    """统计中文有效字数：剔除中英文标点、空白和换行。"""
+    if not text:
+        return 0
+    return sum(1 for ch in text if ch not in _CN_PUNCT and not ch.isspace())
+
+
+def chapter_min_words_no_punct(state: dict[str, Any]) -> int:
+    """从作品 storyLength 拿到不含标点的章节字数下限，默认 2000。"""
+    project = state.get("project") or {}
+    key = str(project.get("storyLength") or "long").strip()
+    cfg = STORY_LENGTH_CONFIGS.get(key, STORY_LENGTH_CONFIGS["long"])
+    return int(cfg.get("minChapterWordsNoPunct") or 2000)
+
+
+def chapter_max_words_no_punct(state: dict[str, Any]) -> int:
+    """从作品 storyLength 拿到不含标点的章节字数上限，默认 2500。"""
+    project = state.get("project") or {}
+    key = str(project.get("storyLength") or "long").strip()
+    cfg = STORY_LENGTH_CONFIGS.get(key, STORY_LENGTH_CONFIGS["long"])
+    return int(cfg.get("maxChapterWordsNoPunct") or 2500)
+
+
+# ---- 去 AI 味:基线驱动的硬规则检测器 ----
+# 基线来源: C:/qj-deai/analysis/baseline_qimao.json (七猫 32 章爆款)
+# 维度: 章末钩子 / 单句成段比 / 对话占比 / AI 黑名单 / 升华句式 / 平均句长
+
+_DE_AI_BLACKLIST = (
+    "然而", "值得一提", "综上所述", "与此同时", "在这一刻", "在某种意义上",
+    "不可否认", "众所周知", "毫无疑问", "从某种角度", "可以说是", "令人",
+    "不由得", "不禁", "深深地", "深邃", "复杂的情感", "难以言喻",
+    "油然而生", "心头一震", "心中一凛", "不由分说",
+    "彰显", "映衬", "透露出一种", "蕴含着", "宛若", "正如",
+    "一般而言", "总而言之", "不约而同",
+    # v3 补充:基于千卷出稿 4-gram 与高频 LLM 套词扫描
+    "随即", "顿时", "瞬间", "一时间", "片刻之后", "与其说",
+    "仿佛一切", "似乎一切", "整个世界",
+)
+
+_DE_AI_SUBLIMATION = (
+    r"并非.{0,15}而是",
+    r"不仅.{0,15}更",
+    r"不仅仅.{0,15}还",
+    r"与其说.{0,15}不如说",
+    r"就如同.{0,15}一般",
+    r"恰如.{0,15}一般",
+    r"仿佛.{0,15}一般",
+)
+
+_DE_AI_HOOK_WORDS = (
+    "？", "！", "...", "…",
+    "竟然", "不料", "突然", "只见", "居然", "怎么会", "什么",
+    "猛地", "戛然", "下一刻", "却见",
+    "岂料", "蓦地", "蓦然", "霎时", "陡然", "骤然",
+    "哪知", "谁知", "不曾想", "想不到", "竟",
+)
+
+_DE_AI_DIALOG_MARKS = ("“", "”", "‘", "’", "「", "」", "『", "』")
+
+_DE_AI_SENT_END = set("。！？!?…")
+
+
+def _split_de_ai_paragraphs(text: str) -> list[str]:
+    return [p.strip() for p in text.split("\n") if p.strip()]
+
+
+def _split_de_ai_sentences(text: str) -> list[str]:
+    sents: list[str] = []
+    buf: list[str] = []
+    for ch in text:
+        buf.append(ch)
+        if ch in _DE_AI_SENT_END:
+            s = "".join(buf).strip()
+            if s:
+                sents.append(s)
+            buf = []
+    if buf:
+        s = "".join(buf).strip()
+        if s:
+            sents.append(s)
+    return sents
+
+
+def compute_de_ai_metrics(text: str) -> dict[str, Any]:
+    """计算章节的关键去 AI 味度量。返回 dict 含:
+    - chars_no_punct, sentences, paragraphs
+    - sent_avg, single_sent_para_ratio, dialog_para_ratio
+    - has_chapter_hook, last_para_preview
+    - ai_blacklist_total, ai_blacklist_hits
+    - sublimation_hits
+    - flags: list[str] — 给 chief_editor 用的可读问题摘要
+    """
+    text = text or ""
+    paras = _split_de_ai_paragraphs(text)
+    sents = _split_de_ai_sentences(text)
+    no_punct = count_chars_no_punct(text)
+    if not sents or no_punct < 50:
+        return {
+            "chars_no_punct": no_punct,
+            "sentences": len(sents),
+            "paragraphs": len(paras),
+            "sent_avg": 0,
+            "single_sent_para_ratio": 0,
+            "dialog_para_ratio": 0,
+            "has_chapter_hook": False,
+            "last_para_preview": "",
+            "ai_blacklist_total": 0,
+            "ai_blacklist_hits": {},
+            "sublimation_hits": 0,
+            "flags": ["正文过短,无法度量"],
+        }
+    sent_lens = [count_chars_no_punct(s) for s in sents]
+    sent_avg = sum(sent_lens) / max(len(sent_lens), 1)
+    para_sent_counts = [len(_split_de_ai_sentences(p)) for p in paras]
+    single_sent_para_ratio = sum(1 for c in para_sent_counts if c <= 1) / max(len(paras), 1)
+    dialog_paras = sum(1 for p in paras if any(m in p for m in _DE_AI_DIALOG_MARKS))
+    dialog_para_ratio = dialog_paras / max(len(paras), 1)
+    last_para = paras[-1] if paras else ""
+    has_chapter_hook = any(w in last_para for w in _DE_AI_HOOK_WORDS)
+    blacklist_hits: dict[str, int] = {}
+    for w in _DE_AI_BLACKLIST:
+        c = text.count(w)
+        if c:
+            blacklist_hits[w] = c
+    blacklist_total = sum(blacklist_hits.values())
+    sublim_hits = 0
+    for pat in _DE_AI_SUBLIMATION:
+        sublim_hits += len(re.findall(pat, text))
+
+    flags: list[str] = []
+    if not has_chapter_hook:
+        flags.append("章末无钩子(末段无 ?! 省略号或转折词)")
+    if single_sent_para_ratio > 0.70:
+        flags.append(f"单句成段率过高 {single_sent_para_ratio:.0%}(爆款 P75 ≤ 69%),段落过碎")
+    if dialog_para_ratio < 0.25:
+        flags.append(f"对话段比例 {dialog_para_ratio:.0%} 过低(爆款 P25 ≥ 27%),角色不说话")
+    if blacklist_total >= 3:
+        sample = ", ".join(f"{k}×{v}" for k, v in list(blacklist_hits.items())[:5])
+        flags.append(f"AI 雷区词命中 {blacklist_total} 次:{sample}")
+    if sublim_hits >= 2:
+        flags.append(f"升华/比喻模板句式 {sublim_hits} 次(并非/不仅/宛若 等)")
+    if sent_avg < 14:
+        flags.append(f"平均句长 {sent_avg:.1f} 字过短(爆款 P25 ≥ 16.7),句式太碎")
+
+    return {
+        "chars_no_punct": no_punct,
+        "sentences": len(sents),
+        "paragraphs": len(paras),
+        "sent_avg": round(sent_avg, 1),
+        "single_sent_para_ratio": round(single_sent_para_ratio, 3),
+        "dialog_para_ratio": round(dialog_para_ratio, 3),
+        "has_chapter_hook": has_chapter_hook,
+        "last_para_preview": last_para[:80],
+        "ai_blacklist_total": blacklist_total,
+        "ai_blacklist_hits": blacklist_hits,
+        "sublimation_hits": sublim_hits,
+        "flags": flags,
+    }
+
+
 def generate_scene_contents_optional_llm(state: dict[str, Any]) -> tuple[bool, str]:
     config = get_llm_config("scene_writer")
     if not config.configured:
         return False, "未配置大模型 API Key，使用本地场景草稿。"
 
     system = (
-        "你是中文网文连载写手。只输出 JSON，不要 Markdown。"
+        "你是中文网文连载写手,文风以七猫/起点/番茄爆款为标尺。只输出 JSON,不要 Markdown。"
         "根据给定作品设定和 Scene Cards 生成当前章节分场景正文。"
-        "正文要短段落、移动端友好、有网文钩子，不要解释创作意图。"
+        "\n【字数硬性要求】每个场景 targetWords 指不含标点的有效中文字数,"
+        "中文标点(,。!?、;:""''《》……—)不计入字数;"
+        "全章合计有效字数(不含标点)必须落在 2000-2500 字之间,"
+        "禁止低于 2000,也禁止超过 2500。按 targetWords × 1.18 估算实际含标点产出长度。"
+        "\n【去 AI 味结构红线】(违反任意一条等于不合格,会被总编打回重写):"
+        "\n  1. 章末必须有钩子:疑问/惊叹/省略号 或 '竟然/不料/突然/猛地/下一刻' 等转折词,留下未解事件;"
+        "\n  2. 单句成段率 ≤ 65%:相邻的短句要合并成长段落,不要每句一段;爆款段落经常包含 2-4 句;"
+        "\n  3. 含引号对话段比例 ≥ 30%:主要场景里主角和对手必须真说话,用中文双引号""...""穿插于动作之间,不要堆在一起;"
+        "\n  4. 平均句长 16-25 字:不要全是 6-10 字短句,也不要写 40+ 字长句;"
+        "\n【AI 雷区词禁用清单】(出现即扣分,改为具体动作或感官):"
+        "然而、与此同时、在这一刻、不可否认、众所周知、毫无疑问、令人XX、不由得、不禁、"
+        "深深地、深邃、复杂的情感、油然而生、心头一震、心中一凛、宛若、正如、一般而言、不约而同。"
+        "\n【升华句式禁用】不要写'并非...而是'/'不仅...更...'/'宛若...一般',改用动作让画面自己说话。"
+        "\n【风格指引】具体名词压过形容词(写'铜钱掉地''油灯灭了'胜过'气氛凝重');"
+        "情绪用动作映射(写'她攥紧了拳'胜过'她很愤怒');五感分布要均衡,不要全靠'看'。"
     )
     user = json.dumps(
         {
@@ -1796,7 +2944,11 @@ def generate_scene_contents_optional_llm(state: dict[str, Any]) -> tuple[bool, s
                     "title": scene["title"],
                     "type": scene["type"],
                     "summary": scene["summary"],
-                    "targetWords": min(max(scene.get("words", 500), 300), 900),
+                    "targetWords": min(max(scene.get("words", 700), 400), 1100),
+                    # planner 出的 per-scene 去 AI 味靶子
+                    "dialogueShare": scene.get("dialogueShare"),
+                    "hookAtEnd": scene.get("hookAtEnd", False),
+                    "hookType": scene.get("hookType"),
                 }
                 for scene in state["scenes"]
             ],
@@ -1814,25 +2966,145 @@ def generate_scene_contents_optional_llm(state: dict[str, Any]) -> tuple[bool, s
         ensure_ascii=False,
     )
 
-    data = chat_json(system, user, temperature=0.75, timeout=120, agent="scene_writer")
-    returned = data.get("scenes") or []
-    by_id = {item.get("id"): item for item in returned if isinstance(item, dict)}
-    updated = 0
-    for scene in state["scenes"]:
-        item = by_id.get(scene["id"])
-        if not item:
-            continue
-        if item.get("title"):
-            scene["title"] = str(item["title"])
-        if item.get("summary"):
-            scene["summary"] = str(item["summary"])
-        if item.get("content"):
-            scene["content"] = str(item["content"]).strip()
-            scene["words"] = len(scene["content"])
-            updated += 1
-    if updated == 0:
-        raise RuntimeError("大模型没有返回可用场景正文")
-    return True, f"大模型已生成 {updated} 个场景正文（{config.model}）。"
+    def _apply_returned(data_in: dict[str, Any]) -> int:
+        returned = data_in.get("scenes") or []
+        by_id = {item.get("id"): item for item in returned if isinstance(item, dict)}
+        updated_local = 0
+        for scene in state["scenes"]:
+            item = by_id.get(scene["id"])
+            if not item:
+                continue
+            if item.get("title"):
+                scene["title"] = str(item["title"])
+            if item.get("summary"):
+                scene["summary"] = str(item["summary"])
+            if item.get("content"):
+                scene["content"] = str(item["content"]).strip()
+                scene["words"] = len(scene["content"])
+                scene["wordsNoPunct"] = count_chars_no_punct(scene["content"])
+                updated_local += 1
+        return updated_local
+
+    # 第一轮:整章 JSON 一次出。失败也不抛 — 留到下面单场景补稿兜底
+    try:
+        data = chat_json(system, user, temperature=0.75, timeout=120, agent="scene_writer")
+        updated = _apply_returned(data)
+    except Exception as exc:  # noqa: BLE001 - JSON 解析/超时等都进单场景兜底
+        _log_agent(
+            state,
+            "scene_writer",
+            "failed",
+            chapter=state["project"].get("chapterNumber"),
+            message=f"整章首轮失败,进入单场景兜底:{type(exc).__name__}: {str(exc)[:150]}",
+        )
+        updated = 0
+    scene_total = len(state["scenes"])
+    total_no_punct = sum(s.get("wordsNoPunct", 0) for s in state["scenes"] if s.get("content"))
+    target_min = chapter_min_words_no_punct(state)
+    target_max = chapter_max_words_no_punct(state)
+    # 半稿兜底:LLM 偶尔只返回首场景就截断 — 改用「单场景逐个补稿」模式
+    # 比整章重出更稳:8k context 内一次只让 LLM 写一个 scene,不会被 token 限制截断
+    if updated < scene_total or total_no_punct < max(target_min - 200, 1500):
+        _log_agent(
+            state,
+            "scene_writer",
+            "revising",
+            chapter=state["project"].get("chapterNumber"),
+            message=(
+                f"半稿兜底触发:total_no_punct={total_no_punct} < target_min={target_min},"
+                f"启动单场景补稿(共 {scene_total} 个场景)"
+            ),
+        )
+        single_system = (
+            "你是中文网文连载写手。任务:为一个被截断的场景补写完整正文。"
+            "只输出 JSON 对象 {\"content\":string},不要任何解释。"
+            "硬性要求:content 字段必须是 600-1100 字的完整中文正文(不含标点字数),"
+            "禁止只写几句话或省略。"
+            "正文要求:含中文双引号对话至少 3 处;段落分布合理(不要每句一段);"
+            "禁用词:然而、与此同时、不由得、不禁、宛若、正如、深邃、油然而生。"
+        )
+        for sc_idx, sc in enumerate(state["scenes"]):
+            current_len = count_chars_no_punct(sc.get("content") or "")
+            if current_len >= 400:  # 已经够长就跳过
+                continue
+            target_w = min(max(sc.get("words", 700), 600), 1100)
+            single_user = json.dumps({
+                "chapterTitle": state["project"].get("chapterTitle"),
+                "chapterNumber": state["project"].get("chapterNumber"),
+                "sceneId": sc.get("id"),
+                "sceneTitle": sc.get("title"),
+                "sceneType": sc.get("type"),
+                "sceneSummary": sc.get("summary"),
+                "targetWords": target_w,
+                "minWords": 600,
+                "maxWords": 1100,
+                "isLastScene": sc is state["scenes"][-1],
+                "hookType": sc.get("hookType"),
+                "dialogueShare": sc.get("dialogueShare"),
+                "currentDraftLen": current_len,
+                "currentDraft": (sc.get("content") or "")[:500],
+                "character": state["characters"]["suHan"],
+                "readerPromise": state.get("plan", {}).get("readerPromise", ""),
+                "memoryTail": (state.get("memory", {}).get("canon") or [])[-5:],
+            }, ensure_ascii=False)
+            try:
+                single_data = chat_json(single_system, single_user, temperature=0.8,
+                                         timeout=120, agent="scene_writer")
+                new_content = str(single_data.get("content") or "").strip()
+                new_no_punct = count_chars_no_punct(new_content)
+                # 接受门槛降到 300 字 + 比现在更长 (适度改进就采纳)
+                if new_no_punct > current_len and new_no_punct >= 300:
+                    sc["content"] = new_content
+                    sc["words"] = len(new_content)
+                    sc["wordsNoPunct"] = new_no_punct
+                    _log_agent(
+                        state,
+                        "scene_writer",
+                        "done",
+                        chapter=state["project"].get("chapterNumber"),
+                        message=f"场景 {sc_idx+1} 补稿成功:{current_len} → {new_no_punct} 字",
+                    )
+                else:
+                    _log_agent(
+                        state,
+                        "scene_writer",
+                        "failed",
+                        chapter=state["project"].get("chapterNumber"),
+                        message=(
+                            f"场景 {sc_idx+1} 补稿无效:current={current_len},"
+                            f"returned={new_no_punct}(门槛 300+)"
+                        ),
+                    )
+            except Exception as exc:  # noqa: BLE001 - 单场景失败不影响其他场景
+                _log_agent(
+                    state,
+                    "scene_writer",
+                    "failed",
+                    chapter=state["project"].get("chapterNumber"),
+                    message=f"场景 {sc_idx+1} 补稿异常:{type(exc).__name__}: {exc}",
+                )
+                continue
+        # 重算 updated 和 total
+        updated = sum(1 for s in state["scenes"] if s.get("content"))
+        total_no_punct = sum(s.get("wordsNoPunct", 0) for s in state["scenes"] if s.get("content"))
+    warning = ""
+    if total_no_punct < target_min:
+        warning = (
+            f"⚠ 本章正文不含标点共 {total_no_punct} 字，低于平台底线 {target_min} 字，"
+            "建议在「单章扩写」中追加字数或在场景卡里调高 targetWords 后重生。"
+        )
+    elif total_no_punct > target_max:
+        warning = (
+            f"⚠ 本章正文不含标点共 {total_no_punct} 字，超过节奏上限 {target_max} 字，"
+            "建议在场景卡里调低 targetWords 后重生或手动精简。"
+        )
+    msg = (
+        f"大模型已生成 {updated} 个场景正文（{config.model}），"
+        f"本章不含标点约 {total_no_punct} 字（目标 {target_min}-{target_max}）。"
+    )
+    if warning:
+        msg = f"{msg} {warning}"
+    return True, msg
 
 
 STYLE_RED_FLAGS = [
@@ -2003,18 +3275,37 @@ def human_edit_chapter_optional_llm(state: dict[str, Any]) -> tuple[bool, str]:
         return False, f"审校模型失败，已用本地规则完成原创表达审校，调整 {updated} 个场景。"
 
     returned = {item.get("id"): item for item in data.get("scenes", []) if isinstance(item, dict)}
+    # 字数守门:逐场景对比 LLM 改写前后字数,改幅过大(>25%)的拒收,保留原文
     updated = 0
+    rejected_scenes = []
     for scene in state.get("scenes", []):
         item = returned.get(scene.get("id"))
         content = str(item.get("content") or "").strip() if item else ""
-        if content:
-            scene["content"] = content
-            scene["words"] = len(content)
-            tags = scene.get("tags", [])
-            if isinstance(tags, list) and "原创表达" not in tags:
-                tags.append("原创表达")
-            updated += 1
+        if not content:
+            continue
+        prev_no_punct = count_chars_no_punct(scene.get("content") or "")
+        new_no_punct = count_chars_no_punct(content)
+        # 改写前长度 < 200 字本身就是半稿,style 阶段不允许"补全"
+        if prev_no_punct < 200:
+            rejected_scenes.append(scene.get("id"))
+            continue
+        # 改幅守门:超过原文 ±25% 视为偏离审校职责
+        upper = int(prev_no_punct * 1.25)
+        lower = int(prev_no_punct * 0.75)
+        if new_no_punct > upper or new_no_punct < lower:
+            rejected_scenes.append(scene.get("id"))
+            continue
+        scene["content"] = content
+        scene["words"] = len(content)
+        scene["wordsNoPunct"] = new_no_punct
+        tags = scene.get("tags", [])
+        if isinstance(tags, list) and "原创表达" not in tags:
+            tags.append("原创表达")
+        updated += 1
     report = build_human_style_report(state)
+    if rejected_scenes:
+        report["rejectedScenes"] = rejected_scenes
+        report["rejectReason"] = "改幅超过 ±25% 或原文过短,保留原稿避免 style 阶段越界"
     llm_report = data.get("styleReport") or {}
     if isinstance(llm_report, dict):
         report["score"] = _safe_int(llm_report.get("score"), report["score"])
@@ -2059,6 +3350,12 @@ def mutate(endpoint: str, body: dict[str, Any] | None = None) -> tuple[dict[str,
 
     elif endpoint == "/api/plan/lock":
         _require_active_project(state)
+        # planner agent: 在锁定计划前让 LLM 把本章场景骨架展开,时间线上 planner 亮灯
+        try:
+            chapter_number = state["project"].get("chapterNumber") or 1
+            plan_chapter_with_llm(state, chapter_number)
+        except Exception:  # noqa: BLE001 - planner 失败不阻断流程,沿用默认骨架
+            pass
         state["plan"]["status"] = "locked"
         state["directorDecision"] = "计划已锁定"
         add_trace(state, "Plan Gate", "用户锁定计划，允许 Scene Writer 分场景生成。")
@@ -2066,17 +3363,33 @@ def mutate(endpoint: str, body: dict[str, Any] | None = None) -> tuple[dict[str,
 
     elif endpoint == "/api/scenes/generate":
         _require_active_project(state)
+        chapter_number = state["project"]["chapterNumber"]
+        # Step 1: planner agent 先把当前章节场景骨架展开/精化
+        plan_chapter_with_llm(state, chapter_number)
+        # Step 2: scene_writer 真正写正文
+        _log_agent(state, "scene_writer", "running", chapter=chapter_number,
+                   message="按 Scene Cards 生成正文草稿")
         llm_used = False
         llm_note = ""
         try:
             llm_used, llm_note = generate_scene_contents_optional_llm(state)
         except Exception as exc:  # noqa: BLE001 - fallback keeps workflow running and records error.
             llm_note = f"大模型生成失败，已回退本地草稿：{exc}"
+            _log_agent(state, "scene_writer", "failed", chapter=chapter_number,
+                       message=str(exc)[:200])
+        else:
+            _log_agent(state, "scene_writer", "done", chapter=chapter_number,
+                       message=llm_note or "正文已生成")
         for scene in state["scenes"]:
             if scene["status"] == "draft":
                 scene["status"] = "ready"
         state["directorDecision"] = "正文已按场景生成，等待审计"
         state["humanStyleReport"] = {"status": "pending", "chapterNumber": state["project"]["chapterNumber"]}
+        # 章节正文重生成: 清掉总编打回标志,重置审计/总编结果
+        state["draftScore"] = 0
+        state["chiefEditorPassed"] = False
+        state["chiefEditorRequiresUser"] = False
+        state["editorReview"] = None
         add_trace(state, "Scene Writer", llm_note or "按 Scene Cards 生成正文草稿。")
         state["lastLLMRun"] = {"used": llm_used, "note": llm_note, "model": get_llm_config("scene_writer").model if llm_used else None}
         message = "正文已生成"
@@ -2138,29 +3451,97 @@ def mutate(endpoint: str, body: dict[str, Any] | None = None) -> tuple[dict[str,
 
     elif endpoint == "/api/audit/run":
         _require_active_project(state)
-        add_trace(state, "Audit Board", "重新执行连续性、读者体验、风格语言三类审计。")
-        if state["project"]["chapterNumber"] == 1:
-            state["draftScore"] = 82
+        chapter_number = state["project"]["chapterNumber"]
+        _log_agent(state, "audit", "running", chapter=chapter_number,
+                   message="审计连续性/读者体验/风格语言")
+        add_trace(state, "Audit Board", "连续性、读者体验、风格语言三类审计。")
+        scenes = state.get("scenes") or []
+        text = "\n\n".join(s.get("content", "") for s in scenes if s.get("content"))
+        no_punct = count_chars_no_punct(text)
+        target_min = chapter_min_words_no_punct(state)
+        target_max = chapter_max_words_no_punct(state)
+        config = get_llm_config("audit")
+        llm_used = False
+        if config.configured and text.strip():
+            system_audit = (
+                "你是中文网文审计编辑,只输出 JSON 不要解释。检查本章在 6 个维度的得分:"
+                "连续性/读者体验/角色一致性/冲突升级/章末钩子/AI腔控制。"
+                "每项给 60-95 的分数 + 一句中文 reason(<=40字),"
+                "再给 draftScore (本章草稿总分,0-100,综合 6 项加权) + issues 数组。"
+                "schema: {\"draftScore\":number,"
+                "\"scores\":[{\"name\":string,\"score\":number,\"reason\":string}],"
+                "\"issues\":[{\"level\":\"major\"|\"minor\",\"location\":string,\"issue\":string,\"fix\":string}]}"
+            )
+            user_audit = json.dumps({
+                "chapterNumber": chapter_number,
+                "chapterTitle": state["project"].get("chapterTitle"),
+                "noPunctCharCount": no_punct,
+                "requiredRange": f"{target_min}-{target_max}",
+                "text": text[:8000],
+                "genre": state.get("project", {}).get("genreLabel", ""),
+                "canon": (state.get("memory", {}).get("canon") or [])[-10:],
+                "readerPromise": state.get("plan", {}).get("readerPromise", ""),
+            }, ensure_ascii=False)
+            try:
+                data_audit = chat_json(system_audit, user_audit, temperature=0.35,
+                                        timeout=90, agent="audit")
+                draft_score = _safe_int(data_audit.get("draftScore"), 0)
+                scores_arr = data_audit.get("scores") or []
+                issues_arr = data_audit.get("issues") or []
+                if draft_score and isinstance(scores_arr, list):
+                    state["draftScore"] = max(min(draft_score, 100), 0)
+                    state["scores"] = [
+                        {
+                            "name": str(s.get("name", "")),
+                            "score": _safe_int(s.get("score"), 0),
+                            "reason": str(s.get("reason", ""))[:120],
+                        }
+                        for s in scores_arr
+                        if isinstance(s, dict) and s.get("name")
+                    ]
+                    state["issues"] = [
+                        {
+                            "level": str(i.get("level", "minor")),
+                            "location": str(i.get("location", "")),
+                            "issue": str(i.get("issue", ""))[:200],
+                            "fix": str(i.get("fix", ""))[:200],
+                        }
+                        for i in issues_arr
+                        if isinstance(i, dict)
+                    ]
+                    llm_used = True
+            except Exception as exc:  # noqa: BLE001 - 失败回退本地规则
+                add_trace(state, "Audit Board", f"LLM 审计失败,沿用本地规则:{exc}")
+        if not llm_used:
+            # 回退:本地规则给个非硬编码的真实分(基于字数+detector)
+            de_ai = compute_de_ai_metrics(text) if text.strip() else {}
+            base = 85
+            if no_punct < target_min:
+                base -= 15
+            elif no_punct > target_max:
+                base -= 5
+            if not de_ai.get("has_chapter_hook", True):
+                base -= 10
+            if de_ai.get("ai_blacklist_total", 0) >= 3:
+                base -= 8
+            state["draftScore"] = max(min(base, 95), 40)
             state["scores"] = [
-                {"name": "连续性", "score": 88, "reason": "新书开篇事实链清晰，没有旧设定冲突"},
-                {"name": "读者体验", "score": 82, "reason": "开篇压力明确，反击动机成立"},
-                {"name": "角色一致性", "score": 84, "reason": "主角克制但有反应，符合低位开局"},
-                {"name": "冲突升级", "score": 80, "reason": "有公开压力，但结尾危机还可以更具体"},
-                {"name": "章末钩子", "score": 78, "reason": "旧物异动有效，但追杀危机需要落地"},
-                {"name": "AI 腔控制", "score": 86, "reason": "短句较多，移动端阅读友好"},
+                {"name": "连续性", "score": base, "reason": "本地规则评估"},
+                {"name": "读者体验", "score": base - 2, "reason": "本地规则评估"},
+                {"name": "角色一致性", "score": base, "reason": "本地规则评估"},
+                {"name": "冲突升级", "score": base - 3, "reason": "本地规则评估"},
+                {"name": "章末钩子", "score": (85 if de_ai.get("has_chapter_hook", True) else 60),
+                 "reason": "末段钩子检测"},
+                {"name": "AI 腔控制", "score": max(95 - de_ai.get("ai_suspicion_score", 0), 40),
+                 "reason": f"AI 嫌疑 {de_ai.get('ai_suspicion_score', 0)}/100"},
                 {"name": "原创表达", "score": 0, "reason": "等待原创表达审校"},
             ]
-            state["issues"] = [
-                {
-                    "level": "major",
-                    "location": "scene_03",
-                    "issue": "章末只有旧物异动，追杀危机还不够具体。",
-                    "fix": "在旧物异动后补一条外部危机，让读者知道下一章马上有事发生。",
-                }
-            ]
-        else:
-            state["draftScore"] = max(state.get("draftScore", 0), 86)
+            state["issues"] = []
         state["directorDecision"] = "审计完成，等待定向修订"
+        _log_agent(state, "audit", "done", chapter=chapter_number,
+                   message=f"打分 {state.get('draftScore')}/100, "
+                           f"{len(state.get('issues') or [])} 个问题"
+                           + (" (LLM)" if llm_used else " (本地)"))
         message = "审计完成"
 
     elif endpoint == "/api/revise/auto":
@@ -2221,6 +3602,81 @@ def mutate(endpoint: str, body: dict[str, Any] | None = None) -> tuple[dict[str,
         else:
             message = "当前没有需要修订的问题"
 
+    elif endpoint == "/api/editor/review":
+        _require_active_project(state)
+        chapter_number = state["project"]["chapterNumber"]
+        # 多轮自动循环:total ≤ 3 (1 次首审 + 2 次重写后复审)
+        attempts = state.setdefault("revisionAttempts", {})
+        key = str(chapter_number)
+        MAX_REVISIONS = 2  # 最多两次自动重写
+        message = ""
+        review = None
+        for loop_round in range(1, MAX_REVISIONS + 2):
+            review = chief_editor_review(state, chapter_number)
+            if not review:
+                if loop_round == 1:
+                    detail = state.get("lastChiefEditorError") or ""
+                    if detail:
+                        raise RuntimeError(f"总编审核失败:{detail}")
+                    raise RuntimeError("总编审核失败,请稍后重试")
+                # 循环中失败 — 用上一轮 review 结果继续
+                break
+            state["editorReview"] = review
+            action = review.get("action") or "revise"
+            score = review.get("score") or 0
+            current = attempts.get(key, 0)
+            if action == "approve":
+                state["chiefEditorPassed"] = True
+                state["chiefEditorRequiresUser"] = False
+                rounds_text = f"({current} 次重写后)" if current > 0 else ""
+                message = f"总编通过 ({score}/100){rounds_text}"
+                break
+            if action == "reject" or current >= MAX_REVISIONS:
+                state["chiefEditorPassed"] = False
+                state["chiefEditorRequiresUser"] = True
+                _log_agent(state, "chief_editor", "review_required", chapter=chapter_number,
+                           message=f"{current+1} 次审核仍不通过,需要人工介入")
+                message = f"总编 {current+1} 次审核仍不通过 ({score}/100),请人工决定"
+                break
+            # 自动重写 1 次
+            attempts[key] = current + 1
+            _log_agent(state, "scene_writer", "revising", chapter=chapter_number,
+                       message=f"按总编批注重写 (第 {current+1} 次)")
+            ok, note = rewrite_scenes_with_editor_notes(state, review.get("editorNotes", ""))
+            if not ok:
+                state["chiefEditorRequiresUser"] = True
+                message = f"总编打回但自动重写失败 ({note}),请人工介入"
+                break
+            _log_agent(state, "scene_writer", "done", chapter=chapter_number,
+                       message=f"重写完成:{note}")
+            # 重写后清审计分,但不退出循环 — 直接再走 chief_editor
+            state["draftScore"] = 0
+            state["chiefEditorPassed"] = False
+            state["chiefEditorRequiresUser"] = False
+            # next loop iteration 再调 chief_editor_review
+
+    elif endpoint == "/api/editor/metrics":
+        # 独立调度 detector,不调 LLM,用于前端"诊断按钮"或事后审计
+        _require_active_project(state)
+        scenes = state.get("scenes") or []
+        text = "\n\n".join(s.get("content", "") for s in scenes if s.get("content"))
+        if not text.strip():
+            raise RuntimeError("当前章节正文为空")
+        de_ai = compute_de_ai_metrics(text)
+        state["lastDeAiMetrics"] = de_ai
+        flag_count = len(de_ai.get("flags") or [])
+        message = f"度量完成,{flag_count} 项触发硬规则" if flag_count else "度量完成,所有硬规则达标"
+
+    elif endpoint == "/api/editor/override":
+        _require_active_project(state)
+        # 用户强制通过总编审核
+        state["chiefEditorPassed"] = True
+        state["chiefEditorRequiresUser"] = False
+        _log_agent(state, "chief_editor", "done",
+                   chapter=state["project"]["chapterNumber"],
+                   message="用户人工通过")
+        message = "已人工通过总编审核"
+
     elif endpoint == "/api/style/human-edit":
         _require_active_project(state)
         llm_used, style_note = human_edit_chapter_optional_llm(state)
@@ -2255,23 +3711,29 @@ def mutate(endpoint: str, body: dict[str, Any] | None = None) -> tuple[dict[str,
 
     elif endpoint == "/api/truth/settle":
         _require_active_project(state)
-        next_version = parse_truth_version(state.get("truthAfter", "v1")) + 1
-        state["truthAfter"] = f"v{next_version} committed"
-        state["directorDecision"] = "TruthPatch 已写入"
         chapter_number = state["project"]["chapterNumber"]
         chapter_title = state["project"]["chapterTitle"]
         protagonist = state["characters"]["suHan"]["name"]
-        canon_title = f"第 {chapter_number} 章事件归档"
-        if not any(item["title"] == canon_title for item in state["memory"]["canon"]):
-            state["memory"]["canon"].append(
-                {
-                    "title": canon_title,
-                    "text": f"{protagonist}完成《{chapter_title}》关键事件：{state['plan']['readerPromise']}",
-                }
-            )
+        # Truth agent: 真接 LLM,从正文里抽取本章新增的事实/伏笔/世界设定/角色状态
+        truth_used, truth_note = settle_truth_with_llm(state, chapter_number, chapter_title)
+        if not truth_used:
+            # LLM 未启用 或 失败:沿用原本的硬编码占位,确保流程不断
+            _log_agent(state, "truth", "done", chapter=chapter_number,
+                       message=f"占位归档({truth_note})")
+            canon_title = f"第 {chapter_number} 章事件归档"
+            if not any(item.get("title") == canon_title for item in state["memory"]["canon"]):
+                state["memory"]["canon"].append(
+                    {
+                        "title": canon_title,
+                        "text": f"{protagonist}完成《{chapter_title}》关键事件：{state['plan'].get('readerPromise','')}",
+                    }
+                )
+        next_version = parse_truth_version(state.get("truthAfter", "v1")) + 1
+        state["truthAfter"] = f"v{next_version} committed"
+        state["directorDecision"] = "TruthPatch 已写入"
         state["issues"] = [issue for issue in state.get("issues", []) if issue.get("level") == "minor"]
-        add_trace(state, "TruthMerger", f"TruthPatch schema 校验通过，真相文件版本递增到 v{next_version}。")
-        message = "TruthPatch 已写入"
+        add_trace(state, "TruthMerger", f"TruthPatch schema 校验通过，真相文件版本递增到 v{next_version}。{truth_note}")
+        message = f"TruthPatch 已写入 (v{next_version}){truth_note and ' · '+truth_note}"
 
     elif endpoint == "/api/chapters/next":
         _require_active_project(state)
@@ -2309,16 +3771,227 @@ def mutate(endpoint: str, body: dict[str, Any] | None = None) -> tuple[dict[str,
         return state, message
 
     elif endpoint == "/api/ideation/generate":
-        idea = generate_idea_draft_optional_llm(body)
+        _log_agent(state, "ideation", "running", message="生成题材书案")
+        try:
+            idea = generate_idea_draft_optional_llm(body)
+        except Exception as exc:
+            _log_agent(state, "ideation", "failed", message=str(exc)[:200])
+            raise
+        ensure_idea_polish_fields(idea)
         state["pendingIdeaDraft"] = idea
         source = f"大模型 {idea.get('llmModel')}" if idea.get("llmGenerated") else "本地题材配置"
+        _log_agent(state, "ideation", "done",
+                   message=f"《{idea['selectedTitle']}》 · {source}")
         add_trace(state, "Ideation", f"根据题材生成书案：《{idea['selectedTitle']}》（{source}）。")
         message = "题材书案已生成"
+
+    elif endpoint == "/api/ideation/set-genre":
+        idea = state.get("pendingIdeaDraft")
+        if not idea:
+            raise ValueError("没有待打磨的书案，请先生成题材方案")
+        ensure_idea_polish_fields(idea)
+        new_genre = str(body.get("genre") or "").strip()
+        if new_genre not in GENRE_DEEP_CONFIGS:
+            raise ValueError(f"不支持的流派：{new_genre}")
+        old_genre = idea.get("genre")
+        if old_genre == new_genre:
+            message = "流派未变化"
+        else:
+            deep = GENRE_DEEP_CONFIGS[new_genre]
+            before_snapshot = {
+                "genre": old_genre,
+                "genreLabel": idea.get("genreLabel"),
+                "deepRules": idea.get("deepRules"),
+            }
+            after_snapshot = {
+                "genre": new_genre,
+                "genreLabel": deep["label"],
+                "deepRules": {
+                    "coreMechanism": deep["coreMechanism"],
+                    "openingRecipe": deep["openingRecipe"],
+                    "payoffEngine": deep["payoffEngine"],
+                    "mustHave": deep["mustHave"],
+                    "avoid": deep["avoid"],
+                    "firstThree": deep["firstThree"],
+                },
+            }
+            idea["genre"] = after_snapshot["genre"]
+            idea["genreLabel"] = after_snapshot["genreLabel"]
+            idea["deepRules"] = after_snapshot["deepRules"]
+            _append_revision(idea, "genre", before_snapshot, after_snapshot, source="manual")
+            # 候选(标题/主角/简介)只在「首次离开原始生成流派」时打标
+            # 之后即使再换几次流派,只要还没同步重生成候选,stale 永远指向"候选实际生成时的流派"
+            # 改回当初生成时的流派 → 候选刚好对上,标记撤掉
+            existing_stale = idea.get("candidatesStaleAfterGenre")
+            if existing_stale:
+                if existing_stale == deep["label"]:
+                    # 改回了候选最初对应的流派,横幅自动撤掉
+                    idea["candidatesStaleAfterGenre"] = None
+                # else: 已有 stale 标记,保持不变(继续指向最初生成流派)
+            else:
+                # 首次离开生成流派,用 before 的 label 作为"候选当时的流派"
+                old_label = before_snapshot.get("genreLabel") or old_genre or "上一流派"
+                idea["candidatesStaleAfterGenre"] = old_label
+            message = f"已改判为「{deep['label']}」（修订 {len(idea['revisions'])}）"
+        idea["confirmed"] = False
+        state["pendingIdeaDraft"] = idea
+
+    elif endpoint == "/api/ideation/regenerate-candidates":
+        idea = state.get("pendingIdeaDraft")
+        if not idea:
+            raise ValueError("没有待打磨的书案，请先生成题材方案")
+        ensure_idea_polish_fields(idea)
+        result = regenerate_all_candidates(idea)
+        old_label = idea.get("candidatesStaleAfterGenre") or "上一流派"
+        new_label = idea.get("genreLabel") or idea.get("genre") or "当前流派"
+        instruction = f"流派从「{old_label}」改判为「{new_label}」后同步重生成候选"
+        rev_count_before = len(idea.get("revisions", []))
+        for field in ("recommendedTitles", "recommendedProtagonists", "synopsisOptions"):
+            new_value = result[field]
+            before = idea.get(field)
+            idea[field] = new_value
+            # 数组改动可能让 selectedTitle / selectedProtagonist / selectedSynopsis 指向失效项,顺手重置
+            if field == "recommendedTitles" and idea.get("selectedTitle") not in new_value:
+                idea["selectedTitle"] = new_value[0]
+            if field == "recommendedProtagonists" and idea.get("selectedProtagonist") not in new_value:
+                idea["selectedProtagonist"] = new_value[0]
+            if field == "synopsisOptions":
+                first = new_value[0] if new_value else None
+                first_text = ""
+                first_style = ""
+                if isinstance(first, dict):
+                    first_text = str(first.get("text") or "")
+                    first_style = str(first.get("style") or "")
+                elif isinstance(first, str):
+                    first_text = first
+                existing_texts = [(o.get("text") if isinstance(o, dict) else o) for o in new_value]
+                if first_text and idea.get("selectedSynopsis") not in existing_texts:
+                    idea["selectedSynopsis"] = first_text
+                    if first_style:
+                        idea["selectedSynopsisStyle"] = first_style
+            _append_revision(idea, field, before, new_value, source="ai-genre-sync", instruction=instruction)
+        idea["candidatesStaleAfterGenre"] = None
+        idea["confirmed"] = False
+        state["pendingIdeaDraft"] = idea
+        added = len(idea["revisions"]) - rev_count_before
+        message = f"已按「{new_label}」流派同步重生成 3 组候选（修订 +{added}）"
+
+    elif endpoint == "/api/ideation/patch":
+        idea = state.get("pendingIdeaDraft")
+        if not idea:
+            raise ValueError("没有待打磨的书案，请先生成题材方案")
+        ensure_idea_polish_fields(idea)
+        field = str(body.get("field") or "").strip()
+        if field not in IDEA_EDITABLE_TEXT_FIELDS:
+            raise ValueError(f"字段 {field} 不允许手动编辑")
+        new_value = body.get("value")
+        if not isinstance(new_value, str):
+            raise ValueError("手动编辑只接受字符串")
+        new_value = new_value.strip()
+        if not new_value:
+            raise ValueError("内容不能为空")
+        before = idea.get(field)
+        if before == new_value:
+            message = "内容未变化"
+        else:
+            idea[field] = new_value
+            _append_revision(idea, field, before, new_value, source="manual")
+            message = f"已记录手改：{IDEA_FIELD_LABELS.get(field, field)}（修订 {len(idea['revisions'])}）"
+        # 手改后视为有未确认改动,撤销 confirmed
+        idea["confirmed"] = False
+        state["pendingIdeaDraft"] = idea
+
+    elif endpoint == "/api/ideation/refine":
+        idea = state.get("pendingIdeaDraft")
+        if not idea:
+            raise ValueError("没有待打磨的书案，请先生成题材方案")
+        ensure_idea_polish_fields(idea)
+        field = str(body.get("field") or "").strip()
+        instruction = str(body.get("instruction") or "").strip()
+        if field in IDEA_EDITABLE_TEXT_FIELDS:
+            new_value = refine_idea_field(idea, field, instruction)
+            before = idea.get(field)
+            idea[field] = new_value
+            _append_revision(idea, field, before, new_value, source="ai", instruction=instruction)
+        elif field in IDEA_REGENERATABLE_ARRAY_FIELDS:
+            new_value = _regenerate_array_field(idea, field, instruction)
+            before = idea.get(field)
+            idea[field] = new_value
+            # 数组改动可能让 selectedTitle / selectedProtagonist / selectedSynopsis 指向失效项,顺手重置一下
+            if field == "recommendedTitles" and idea.get("selectedTitle") not in new_value:
+                idea["selectedTitle"] = new_value[0]
+            if field == "recommendedProtagonists" and idea.get("selectedProtagonist") not in new_value:
+                idea["selectedProtagonist"] = new_value[0]
+            if field == "synopsisOptions":
+                first_text = ""
+                first_style = ""
+                first = new_value[0] if new_value else None
+                if isinstance(first, dict):
+                    first_text = str(first.get("text") or "")
+                    first_style = str(first.get("style") or "")
+                elif isinstance(first, str):
+                    first_text = first
+                if first_text and idea.get("selectedSynopsis") not in [
+                    (o.get("text") if isinstance(o, dict) else o) for o in new_value
+                ]:
+                    idea["selectedSynopsis"] = first_text
+                    if first_style:
+                        idea["selectedSynopsisStyle"] = first_style
+            _append_revision(idea, field, before, new_value, source="ai", instruction=instruction)
+            # 用户主动重生成了某个候选数组,横幅可以撤掉
+            idea["candidatesStaleAfterGenre"] = None
+        else:
+            raise ValueError(f"字段 {field} 不支持 AI 打磨")
+        idea["confirmed"] = False
+        state["pendingIdeaDraft"] = idea
+        message = f"AI 打磨完成：{IDEA_FIELD_LABELS.get(field, field)}（修订 {len(idea['revisions'])}）"
+
+    elif endpoint == "/api/ideation/revert":
+        idea = state.get("pendingIdeaDraft")
+        if not idea:
+            raise ValueError("没有待打磨的书案，请先生成题材方案")
+        ensure_idea_polish_fields(idea)
+        revision_id = str(body.get("revisionId") or "").strip()
+        if not revision_id:
+            raise ValueError("缺少修订 ID")
+        field, before, target_value = _revert_field_value(idea, revision_id)
+        if field == "genre" and isinstance(target_value, dict):
+            # genre 字段的快照是 {genre, genreLabel, deepRules} 打包,要展开回去
+            current_snapshot = {
+                "genre": idea.get("genre"),
+                "genreLabel": idea.get("genreLabel"),
+                "deepRules": idea.get("deepRules"),
+            }
+            idea["genre"] = target_value.get("genre")
+            idea["genreLabel"] = target_value.get("genreLabel")
+            idea["deepRules"] = target_value.get("deepRules")
+            _append_revision(idea, "genre", current_snapshot, target_value, source="revert", instruction=f"回退到 {revision_id}")
+            display_label = target_value.get("genreLabel") or target_value.get("genre") or "流派"
+            message = f"已回退流派为「{display_label}」（修订 {len(idea['revisions'])}）"
+        else:
+            idea[field] = target_value
+            _append_revision(idea, field, before, target_value, source="revert", instruction=f"回退到 {revision_id}")
+            message = f"已回退 {IDEA_FIELD_LABELS.get(field, field)}（修订 {len(idea['revisions'])}）"
+        idea["confirmed"] = False
+        state["pendingIdeaDraft"] = idea
+
+    elif endpoint == "/api/ideation/confirm":
+        idea = state.get("pendingIdeaDraft")
+        if not idea:
+            raise ValueError("没有待打磨的书案，请先生成题材方案")
+        ensure_idea_polish_fields(idea)
+        confirmed = bool(body.get("confirmed"))
+        idea["confirmed"] = confirmed
+        state["pendingIdeaDraft"] = idea
+        message = "已确认书案设定" if confirmed else "已取消确认"
 
     elif endpoint == "/api/projects/create-from-idea":
         idea = body.get("ideaDraft") or state.get("pendingIdeaDraft") or state.get("ideaDraft")
         if not idea:
             raise ValueError("没有可采用的书案，请先生成题材方案")
+        ensure_idea_polish_fields(idea)
+        if not idea.get("confirmed"):
+            raise RuntimeError("请先勾选「我已通读并确认」再创建作品")
         title = clean_title_option(body.get("title") or idea.get("selectedTitle") or "未命名新书")
         protagonist = clean_name_option(body.get("protagonist") or idea.get("selectedProtagonist") or "主角")
         synopsis = str(body.get("synopsis") or idea.get("selectedSynopsis") or idea.get("premise") or "").strip()
@@ -2362,6 +4035,13 @@ def mutate(endpoint: str, body: dict[str, Any] | None = None) -> tuple[dict[str,
         add_trace(state, "LLM Test", state["lastLLMRun"]["note"])
         message = state["lastLLMRun"]["note"]
 
+    elif endpoint == "/api/export/acknowledge":
+        # 用户在导出提醒横幅点「我已导出」时:把 lastExportedChapter 推到当前已归档最高章
+        archived_max = max([int(c.get("number") or 0) for c in state.get("chapterArchive", [])] + [0])
+        state["lastExportedChapter"] = max(int(state.get("lastExportedChapter") or 0), archived_max)
+        add_trace(state, "Export", f"用户确认已导出至第 {state['lastExportedChapter']} 章")
+        message = "已确认导出,提醒已清除"
+
     else:
         raise KeyError(f"Unknown endpoint: {endpoint}")
 
@@ -2373,23 +4053,74 @@ class NovelStudioHandler(SimpleHTTPRequestHandler):
     server_version = "Qianjuan/0.1"
 
     def _setup_user_ctx(self) -> None:
-        """从 Cookie 取 UID,无则生成新的并标记 Set-Cookie 在响应里下发。"""
+        """认证身份解析(按优先级):
+        1) Authorization: Bearer <ec-ai 主站 token> → 用主站 uid (登录用户)
+        2) Cookie qj_uid → 用老的匿名 cookie uid (兼容期, 不再下发新 cookie)
+        3) 无身份 → 临时分配 uid, 但标记为 anonymous (前端会触发登录门)
+        """
         from http.cookies import SimpleCookie
 
-        cookie_header = self.headers.get("Cookie", "")
         uid: str | None = None
-        if cookie_header:
-            try:
-                parsed = SimpleCookie(cookie_header)
-                morsel = parsed.get(COOKIE_NAME)
-                if morsel:
-                    uid = _safe_uid(morsel.value)
-            except Exception:  # noqa: BLE001
-                uid = None
+        authed_email: str | None = None
+        is_authed = False
+
+        # 1) Authorization header
+        auth_header = self.headers.get("Authorization") or self.headers.get("authorization") or ""
+        if auth_header.startswith("Bearer "):
+            token = auth_header[len("Bearer ") :].strip()
+            decoded = verify_ec_ai_token(token)
+            if decoded:
+                uid = decoded["uid"]
+                authed_email = decoded["email"]
+                is_authed = True
+
+        # 1.5) Forum current-user trust 通道
+        # 主站 ai秘密基地 的用户态是纯前端 localStorage (aisecretlair-forum-current-user),
+        # 没有后端 cookie/JWT 可用。千卷与主站同源 (www.aisecretlair.com),所以
+        # localStorage 同源共享 — 我们让前端把这个用户 JSON base64 后通过
+        # X-Forum-Current-User 头送过来,后端 trust 这个值取 uid/email。
+        # 安全性等同于主站本身 (主站也是纯客户端 auth),不增加新攻击面。
+        if not is_authed:
+            forum_header = (
+                self.headers.get("X-Forum-Current-User")
+                or self.headers.get("x-forum-current-user")
+                or ""
+            )
+            if forum_header:
+                try:
+                    import base64 as _b64
+                    pad = "=" * ((4 - len(forum_header) % 4) % 4)
+                    raw = _b64.urlsafe_b64decode(forum_header + pad).decode("utf-8")
+                    user_obj = json.loads(raw)
+                    forum_uid = (user_obj.get("id") or "").strip()
+                    forum_email = (user_obj.get("email") or "").strip()
+                    if forum_uid:
+                        uid = "forum_" + forum_uid
+                        authed_email = forum_email or None
+                        is_authed = True
+                except Exception:  # noqa: BLE001
+                    pass
+
+        # 2) 兼容老 cookie
+        if not uid:
+            cookie_header = self.headers.get("Cookie", "")
+            if cookie_header:
+                try:
+                    parsed = SimpleCookie(cookie_header)
+                    morsel = parsed.get(COOKIE_NAME)
+                    if morsel:
+                        uid = _safe_uid(morsel.value)
+                except Exception:  # noqa: BLE001
+                    uid = None
+
+        # 3) 无身份: 给个临时 uid,但不写 cookie(前端门会要求登录)
         if not uid:
             uid = uuid.uuid4().hex
-            self._new_uid = uid
+            # 不再自动 set cookie,因为我们要强制登录
+            # self._new_uid = uid
         _user_ctx.uid = uid
+        _user_ctx.is_authed = is_authed
+        _user_ctx.email = authed_email
         # 同步推到 llm_adapter,让 LLM 配置 per-user 隔离
         _llm_set_user_id(uid)
 
@@ -2417,9 +4148,28 @@ class NovelStudioHandler(SimpleHTTPRequestHandler):
             self.send_header("Set-Cookie", cookie_val)
         super().end_headers()
 
+    # 公开端点白名单(不需要登录就能访问)
+    PUBLIC_ENDPOINTS = frozenset({"/api/auth/status"})
+
+    def _require_auth_or_401(self, parsed_path: str) -> bool:
+        """临时取消鉴权拦截 — 全部放行 (2026-05-24 用户要求, 等 SSO 重做)"""
+        return True
+
     def do_GET(self) -> None:
         self._setup_user_ctx()
         parsed = urlparse(self.path)
+        # 公开端点: 不需要登录就能查询身份状态
+        if parsed.path == "/api/auth/status":
+            self.send_json({
+                "authenticated": bool(getattr(_user_ctx, "is_authed", False)),
+                "email": getattr(_user_ctx, "email", None),
+                "uid": _current_uid() if getattr(_user_ctx, "is_authed", False) else None,
+                "loginUrl": "https://www.aisecretlair.com/",
+            })
+            return
+        # 鉴权门:其他 /api/* 必须登录
+        if not self._require_auth_or_401(parsed.path):
+            return
         if parsed.path == "/api/state":
             self.send_json({"state": public_state(store.load())})
             return
@@ -2432,34 +4182,51 @@ class NovelStudioHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/llm/config":
             self.send_json({"llm": public_llm_config()})
             return
-        if parsed.path == "/api/export/markdown":
+        if parsed.path in ("/api/export/markdown", "/api/export/txt"):
             state = store.load()
             query = parse_qs(parsed.query)
             chapter_number = _safe_int(query.get("chapter", [None])[0], 0) or None
             try:
-                content = export_markdown(state, chapter_number).encode("utf-8")
+                content = export_chapter_plaintext(state, chapter_number).encode("utf-8")
             except RuntimeError as user_exc:
-                self.send_json({"error": str(user_exc)}, status=HTTPStatus.BAD_REQUEST)
+                self.send_export_error(str(user_exc))
                 return
             filename_number = chapter_number or state["project"]["chapterNumber"]
-            filename = f"chapter-{filename_number:03d}.md"
+            # 记录最近导出章节,触发/清空导出提醒
+            try:
+                target = max(int(state.get("lastExportedChapter") or 0), int(filename_number))
+                state["lastExportedChapter"] = target
+                store.save(state)
+            except Exception:
+                pass
+            filename = f"chapter-{filename_number:03d}.txt"
             self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "text/markdown; charset=utf-8")
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
             self.send_header("Content-Length", str(len(content)))
             self.end_headers()
             self.wfile.write(content)
             return
-        if parsed.path == "/api/export/book":
+        if parsed.path in ("/api/export/book", "/api/export/book-txt"):
             state = store.load()
             try:
-                content = export_book_markdown(state).encode("utf-8")
+                content = export_book_plaintext(state).encode("utf-8")
             except RuntimeError as user_exc:
-                self.send_json({"error": str(user_exc)}, status=HTTPStatus.BAD_REQUEST)
+                self.send_export_error(str(user_exc))
                 return
+            project_title = (state.get("project") or {}).get("title") or "book"
+            safe_title = re.sub(r"[\\/:*?\"<>|\s]+", "_", project_title).strip("_") or "book"
+            # 全书导出 → 已完成的所有章节都已落盘
+            try:
+                archived_max = max([int(c.get("number") or 0) for c in state.get("chapterArchive", [])] + [0])
+                state["lastExportedChapter"] = max(int(state.get("lastExportedChapter") or 0), archived_max)
+                store.save(state)
+            except Exception:
+                pass
+            filename = f"{safe_title}.txt"
             self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "text/markdown; charset=utf-8")
-            self.send_header("Content-Disposition", 'attachment; filename="book.md"')
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
             self.send_header("Content-Length", str(len(content)))
             self.end_headers()
             self.wfile.write(content)
@@ -2471,6 +4238,8 @@ class NovelStudioHandler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         if not parsed.path.startswith("/api/"):
             self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        if not self._require_auth_or_401(parsed.path):
             return
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -2484,7 +4253,41 @@ class NovelStudioHandler(SimpleHTTPRequestHandler):
                 )
                 return
             body_bytes = self.rfile.read(length) if length else b"{}"
-            body = json.loads(body_bytes.decode("utf-8")) if body_bytes else {}
+            # 容错解码:某些客户端(curl on Windows、误配置 SDK)会发 GBK/Latin-1 编码的请求体
+            # 优先按 Content-Type 上声明的 charset;否则 utf-8 → gbk → utf-8(replace) 链式回退
+            ctype = self.headers.get("Content-Type", "") or ""
+            declared = ""
+            for piece in ctype.split(";"):
+                piece = piece.strip().lower()
+                if piece.startswith("charset="):
+                    declared = piece[len("charset="):].strip().strip('"').strip("'")
+                    break
+            decoded = None
+            tried = []
+            order = []
+            if declared:
+                order.append(declared)
+            for cand in ("utf-8", "gbk", "gb18030"):
+                if cand not in order:
+                    order.append(cand)
+            for enc in order:
+                try:
+                    decoded = body_bytes.decode(enc)
+                    break
+                except (UnicodeDecodeError, LookupError) as exc:
+                    tried.append(f"{enc}:{type(exc).__name__}")
+                    continue
+            if decoded is None:
+                # 最后兜底:utf-8 replace,保证不抛 500;业务层会按字段缺失友好提示
+                decoded = body_bytes.decode("utf-8", errors="replace")
+            try:
+                body = json.loads(decoded) if decoded.strip() else {}
+            except json.JSONDecodeError as exc:
+                self.send_json(
+                    {"error": "请求体不是合法 JSON,请检查客户端是否以 UTF-8 编码发送", "detail": str(exc)[:200]},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
             state, message = mutate(parsed.path, body)
             self.send_json(response_payload(state, message))
         except RuntimeError as user_exc:
@@ -2521,6 +4324,131 @@ class NovelStudioHandler(SimpleHTTPRequestHandler):
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
         self.wfile.write(content)
+
+    def _wants_html(self) -> bool:
+        """浏览器直接访问(地址栏/外链)时 Accept 头含 text/html;
+        前端 fetch() 默认是 */*。靠这个区分两种来访者。"""
+        accept = (self.headers.get("Accept") or "").lower()
+        if "text/html" in accept and "application/json" not in accept.split(",")[0]:
+            return True
+        return "text/html" in accept and accept.startswith("text/html")
+
+    def send_user_error_page(self, message: str, status: HTTPStatus = HTTPStatus.BAD_REQUEST,
+                             title: str = "暂时还没法导出", back_label: str = "回到千卷工作台") -> None:
+        """给浏览器直接访问 API 的人一个体面的错误页,而不是光秃秃的 JSON。"""
+        safe_msg = (message or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        safe_title = (title or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        html = f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{safe_title} · 千卷</title>
+<style>
+  :root {{
+    --bg:#f6f3ec; --paper:#fffdf8; --ink:#25211b; --muted:#746f66;
+    --line:#ded7ca; --amber:#b36a1f; --amber-soft:#f6eadb; --teal:#1f7a74;
+  }}
+  *{{box-sizing:border-box}}
+  html,body{{height:100%;margin:0}}
+  body{{
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Noto Serif SC","Microsoft YaHei",serif;
+    background:
+      radial-gradient(900px 600px at 20% 0%, rgba(179,106,31,.10), transparent 60%),
+      radial-gradient(700px 500px at 100% 100%, rgba(31,122,116,.08), transparent 60%),
+      var(--bg);
+    color:var(--ink);
+    display:grid;place-items:center;
+    padding:32px 20px;
+    -webkit-font-smoothing:antialiased;
+  }}
+  .card{{
+    max-width:520px;width:100%;
+    background:var(--paper);
+    border:1px solid var(--line);
+    border-radius:18px;
+    padding:42px 36px 32px;
+    text-align:center;
+    box-shadow:0 24px 60px rgba(62,53,39,.10);
+    position:relative;
+  }}
+  .card::before{{
+    content:"";position:absolute;inset:8px;border:1px dashed rgba(179,106,31,.22);
+    border-radius:12px;pointer-events:none;
+  }}
+  .icon{{
+    width:64px;height:64px;border-radius:50%;
+    background:var(--amber-soft);
+    color:var(--amber);
+    font-size:32px;line-height:64px;
+    margin:0 auto 18px;
+    border:1px solid rgba(179,106,31,.25);
+  }}
+  h1{{
+    font-size:22px;margin:0 0 12px;font-weight:600;letter-spacing:.5px;
+  }}
+  p.msg{{
+    font-size:15px;line-height:1.75;color:var(--ink);
+    margin:0 0 8px;
+  }}
+  p.hint{{
+    font-size:13px;color:var(--muted);margin:0 0 26px;line-height:1.7;
+  }}
+  .divider{{
+    width:48px;height:1px;background:var(--line);margin:18px auto;
+  }}
+  .actions{{
+    display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:8px;
+  }}
+  .btn{{
+    display:inline-flex;align-items:center;gap:6px;
+    padding:10px 20px;border-radius:10px;
+    text-decoration:none;font-size:14px;font-weight:500;
+    transition:transform 80ms, background 120ms, border-color 120ms;
+    font-family:inherit;
+  }}
+  .btn.primary{{
+    background:var(--amber);color:#fffdf8;border:1px solid var(--amber);
+  }}
+  .btn.primary:hover{{background:#9a5a17;border-color:#9a5a17}}
+  .btn.ghost{{
+    background:transparent;color:var(--ink);border:1px solid var(--line);
+  }}
+  .btn.ghost:hover{{background:rgba(179,106,31,.06);border-color:rgba(179,106,31,.4)}}
+  .btn:active{{transform:translateY(1px)}}
+  .seal{{
+    margin-top:26px;font-size:11px;color:var(--muted);letter-spacing:.2em;
+  }}
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">📜</div>
+    <h1>{safe_title}</h1>
+    <p class="msg">{safe_msg}</p>
+    <p class="hint">回到工作台,先在「题材成书」或「手动新建」里开一本作品,写到 settle 之后就能导出归档了。</p>
+    <div class="divider"></div>
+    <div class="actions">
+      <a class="btn primary" href="/toolbox/qianjuan/">{back_label}</a>
+      <a class="btn ghost" href="/toolbox/">浏览 AI 工具箱</a>
+    </div>
+    <div class="seal">千 卷 · 沉 淀 创 作</div>
+  </div>
+</body>
+</html>"""
+        content = html.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
+
+    def send_export_error(self, message: str, status: HTTPStatus = HTTPStatus.BAD_REQUEST) -> None:
+        """导出口的错误统一走这:浏览器直接访问 → HTML 错误页;fetch → JSON。"""
+        if self._wants_html():
+            self.send_user_error_page(message, status=status)
+        else:
+            self.send_json({"error": message}, status=status)
 
     def guess_type(self, path: str) -> str:
         if path.endswith(".js"):

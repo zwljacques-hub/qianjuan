@@ -100,9 +100,9 @@
                     <label class="quick-length-field">
                       <span>篇幅</span>
                       <select id="quickStoryLength">
-                        <option value="long" selected>长篇连载 · 约100万字</option>
-                        <option value="medium">中篇小说 · 约20万字</option>
-                        <option value="short">短篇小说 · 约5万字</option>
+                        <option value="long" selected>长篇连载 · 约100万字 / 400章 · 每章 2000-2500 字（不含标点）</option>
+                        <option value="medium">中篇小说 · 约20万字 / 80章 · 每章 2000-2500 字（不含标点）</option>
+                        <option value="short">短篇小说 · 约5万字 / 12章 · 每章 2000-2500 字（不含标点）</option>
                       </select>
                     </label>
                     <div class="quick-actions">
@@ -145,6 +145,9 @@
                     </div>
                   </div>
                 </section>
+
+                <section id="agentTimeline" class="agent-timeline" hidden></section>
+                <section id="editorReviewPanel" class="editor-review-panel" hidden></section>
 
                 <section class="finish-panel" id="finishPanel" hidden>
                   <div>
@@ -483,9 +486,9 @@
             <label>
               <span>篇幅/目标字数</span>
               <select name="storyLength">
-                <option value="long" selected>长篇连载 · 约100万字 / 400章</option>
-                <option value="medium">中篇小说 · 约20万字 / 80章</option>
-                <option value="short">短篇小说 · 约5万字 / 12章</option>
+                <option value="long" selected>长篇连载 · 约100万字 / 400章 · 每章 2000-2500 字（不含标点）</option>
+                <option value="medium">中篇小说 · 约20万字 / 80章 · 每章 2000-2500 字（不含标点）</option>
+                <option value="short">短篇小说 · 约5万字 / 12章 · 每章 2000-2500 字（不含标点）</option>
               </select>
             </label>
           </div>
@@ -561,9 +564,9 @@
             <label>
               <span>篇幅/目标字数</span>
               <select name="storyLength">
-                <option value="long" selected>长篇连载 · 约100万字 / 400章</option>
-                <option value="medium">中篇小说 · 约20万字 / 80章</option>
-                <option value="short">短篇小说 · 约5万字 / 12章</option>
+                <option value="long" selected>长篇连载 · 约100万字 / 400章 · 每章 2000-2500 字（不含标点）</option>
+                <option value="medium">中篇小说 · 约20万字 / 80章 · 每章 2000-2500 字（不含标点）</option>
+                <option value="short">短篇小说 · 约5万字 / 12章 · 每章 2000-2500 字（不含标点）</option>
               </select>
             </label>
           </div>
@@ -579,32 +582,72 @@
               <h3 id="ideaTitle">推荐书案</h3>
               <p id="ideaPremise"></p>
             </div>
-            <button class="primary-button" type="button" id="adoptIdeaBtn">采用方案创建作品</button>
+            <div class="idea-result-actions">
+              <label class="confirm-row">
+                <input type="checkbox" id="ideaConfirmCheckbox" />
+                <span>我已通读并确认这本书的设定</span>
+              </label>
+              <button class="primary-button" type="button" id="adoptIdeaBtn">采用方案创建作品</button>
+            </div>
+          </div>
+          <div class="idea-edit-guide">
+            <span class="idea-edit-guide-icon">💡</span>
+            <div class="idea-edit-guide-text">
+              <strong>下方每一项都可以改</strong> · 直接<strong>点正文</strong>手改,或点右上角 <span class="kbd">✨ AI 改写</span> 让 AI 按你的指令改写,<span class="kbd">📜 历史</span> 随时回滚。改完勾选「确认设定」再「采用方案创建作品」。
+            </div>
           </div>
           <div class="idea-grid">
-            <div class="idea-box">
+            <div class="idea-box wide" id="ideaGenreBox">
+              <span>流派判断</span>
+              <div class="genre-pick-row">
+                <span class="genre-pick-label">判定为 <strong id="ideaGenreLabel">--</strong></span>
+                <select id="ideaGenreSelect" class="genre-pick-select" aria-label="改判流派"></select>
+                <span class="genre-pick-hint" id="ideaGenreHint">判错了？这里直接改，下面的爆款配置会跟着换</span>
+              </div>
+            </div>
+            <div class="idea-box" data-field="recommendedTitles">
               <span>推荐书名</span>
+              <div class="box-actions"></div>
               <div id="ideaTitles"></div>
             </div>
-            <div class="idea-box">
+            <div class="idea-box" data-field="recommendedProtagonists">
               <span>主角名</span>
+              <div class="box-actions"></div>
               <div id="ideaHeroes"></div>
             </div>
             <div class="idea-box wide">
               <span>篇幅规划</span>
               <p id="ideaLength"></p>
             </div>
-            <div class="idea-box wide">
+            <div class="idea-box wide" data-field="synopsisOptions">
               <span>简介候选</span>
+              <div class="box-actions"></div>
               <div class="synopsis-choice-list" id="ideaSynopsisOptions"></div>
             </div>
-            <div class="idea-box wide">
+            <div class="idea-box wide" data-field="selectedSynopsis">
+              <span>当前简介</span>
+              <div class="box-actions"></div>
+              <p id="ideaSelectedSynopsis"></p>
+            </div>
+            <div class="idea-box wide" data-field="sellingPoint">
               <span>核心卖点</span>
+              <div class="box-actions"></div>
               <p id="ideaSellingPoint"></p>
             </div>
-            <div class="idea-box wide">
+            <div class="idea-box wide" data-field="worldSetting">
               <span>世界观</span>
+              <div class="box-actions"></div>
               <p id="ideaWorld"></p>
+            </div>
+            <div class="idea-box wide" data-field="mainConflict">
+              <span>主冲突</span>
+              <div class="box-actions"></div>
+              <p id="ideaMainConflict"></p>
+            </div>
+            <div class="idea-box wide" data-field="firstGoal">
+              <span>第一章目标</span>
+              <div class="box-actions"></div>
+              <p id="ideaFirstGoal"></p>
             </div>
             <div class="idea-box wide">
               <span>题材爆款配置</span>
