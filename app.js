@@ -2344,3 +2344,90 @@ window.qjRenderAuthGate = function (masked, email) {
 };
 
 init();
+// === Progress overlay for long-running endpoints ===
+(function () {
+  const LABELS = {
+    '/api/ideation/generate': {title: '正在生成题材构思',     sub: 'AI 在脑暴 3 个候选方向,通常 10-30 秒'},
+    '/api/ideation/regenerate-candidates': {title: '正在重新生成 3 个候选', sub: '依据当前流派重新展开,通常 20-40 秒'},
+    '/api/ideation/refine':   {title: '正在打磨题材',         sub: '按你的方向修订当前候选,通常 10-20 秒'},
+    '/api/ideation/patch':    {title: '正在按指令编辑',       sub: '按你的批注微调,通常 5-15 秒'},
+    '/api/ideation/confirm':  {title: '正在确认题材',         sub: '处理中...'},
+    '/api/ideation/set-genre':{title: '正在切换流派',         sub: '处理中...'},
+    '/api/projects/create-from-idea': {title: '正在创建项目', sub: '准备故事档案,通常 5-10 秒'},
+    '/api/plan/lock':         {title: '正在锁定章节计划',     sub: '展开本章场景骨架,通常 10-30 秒'},
+    '/api/scenes/generate':   {title: '正在生成章节正文',     sub: 'AI 正在写 2000+ 字,通常 30-90 秒'},
+    '/api/scenes/finalize':   {title: '正在锁定章节',         sub: '把章节存档,准备下一章'},
+    '/api/audit/run':         {title: '正在审计章节',         sub: '检查连续性 / 体验 / 风格,通常 10-30 秒'},
+    '/api/editor/review':     {title: '总编正在审稿',         sub: '不达标会自动重写,最多 3 轮,通常 30 秒 - 3 分钟'},
+    '/api/editor/override':   {title: '记录人工通过',         sub: '处理中...'},
+    '/api/revise/auto':       {title: '正在按审计建议修订',   sub: 'AI 调整问题段落,通常 10-20 秒'},
+    '/api/style/run':         {title: '正在审校原创表达',     sub: '减少模板化和 AI 腔,通常 10-30 秒'},
+    '/api/style/human-edit':  {title: '正在精修文笔',         sub: '深度打磨语言,通常 15-40 秒'},
+    '/api/truth/settle':      {title: '正在归档真相',         sub: '从正文抽取新事实进 canon,通常 10-30 秒'},
+  };
+  let busyCount = 0;
+  let startTime = 0;
+  let timerId = null;
+  let warnTimer = null;
+  function _byId(id){ return document.getElementById(id); }
+  function fmtElapsed(ms){
+    const s = Math.floor(ms/1000);
+    if (s < 60) return s + 's';
+    const m = Math.floor(s/60), r = s%60;
+    return m + 'm ' + r + 's';
+  }
+  function show(label){
+    busyCount++;
+    const ov = _byId('qjBusyOverlay'); if (!ov) return;
+    if (busyCount === 1) {
+      _byId('qjBusyTitle').textContent = label.title || '处理中';
+      _byId('qjBusySub').textContent   = label.sub   || 'AI 正在思考,请稍候';
+      _byId('qjBusyElapsed').textContent = '0s';
+      _byId('qjBusyHint').textContent = label.hint || '可以喝口水等等';
+      _byId('qjBusyWarn').hidden = true;
+      ov.hidden = false;
+      startTime = Date.now();
+      timerId = setInterval(function(){
+        _byId('qjBusyElapsed').textContent = fmtElapsed(Date.now() - startTime);
+      }, 250);
+      if (warnTimer) clearTimeout(warnTimer);
+      warnTimer = setTimeout(function(){
+        const el = _byId('qjBusyWarn'); if (el) el.hidden = false;
+      }, 90000);
+    }
+  }
+  function hide(){
+    busyCount = Math.max(0, busyCount - 1);
+    if (busyCount === 0) {
+      const ov = _byId('qjBusyOverlay'); if (ov) ov.hidden = true;
+      if (timerId) { clearInterval(timerId); timerId = null; }
+      if (warnTimer) { clearTimeout(warnTimer); warnTimer = null; }
+    }
+  }
+  window.qjBusyShow = show;
+  window.qjBusyHide = hide;
+
+  // 包一层 fetch:对任何 POST /api/* 自动弹 overlay
+  const prevFetch = window.fetch.bind(window);
+  window.fetch = function(input, init){
+    const url = typeof input === 'string' ? input : (input && input.url) || '';
+    const method = ((init && init.method) || (typeof input === 'object' && input && input.method) || 'GET').toString().toUpperCase();
+    let shown = false;
+    if (method === 'POST' && url.indexOf('/api/') === 0) {
+      const key = url.split('?')[0];
+      const label = LABELS[key] || {title: '处理中', sub: 'AI 正在处理你的请求'};
+      show(label);
+      shown = true;
+    }
+    return prevFetch(input, init).then(function(resp){
+      if (shown) hide();
+      return resp;
+    }, function(err){
+      if (shown) hide();
+      throw err;
+    });
+  };
+})();
+// === END progress overlay ===
+
+

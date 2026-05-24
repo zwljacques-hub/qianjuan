@@ -703,6 +703,21 @@
     </div>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+    <div id="qjBusyOverlay" class="qj-busy-overlay" hidden role="dialog" aria-live="polite" aria-busy="true">
+      <div class="qj-busy-card">
+        <div class="qj-busy-spinner" aria-hidden="true"></div>
+        <div class="qj-busy-title" id="qjBusyTitle">处理中...</div>
+        <div class="qj-busy-sub" id="qjBusySub">AI 正在思考,请稍候</div>
+        <div class="qj-busy-meta">
+          <span id="qjBusyElapsed">0s</span>
+          <span class="qj-busy-dot">·</span>
+          <span id="qjBusyHint">通常 10-60 秒</span>
+        </div>
+        <div class="qj-busy-warn" id="qjBusyWarn" hidden>仍在运行...如果超过 5 分钟没响应,请刷新页面重试</div>
+      </div>
+    </div>
+
     <script src="./app.js"></script>
   </body>
 </html>

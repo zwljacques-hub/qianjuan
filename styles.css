@@ -2786,3 +2786,66 @@ button {
 }
 .editor-metric.ok .editor-metric-value { color: #1f6f5b; }
 .editor-metric.bad .editor-metric-value { color: #a02720; }
+
+
+/* ==== 长跑接口 progress overlay ==== */
+.qj-busy-overlay {
+  position: fixed; inset: 0; z-index: 9999;
+  background: rgba(15, 22, 33, 0.55);
+  backdrop-filter: blur(2px);
+  display: flex; align-items: center; justify-content: center;
+  animation: qjBusyFade .15s ease-out;
+}
+.qj-busy-overlay[hidden] { display: none; }
+.qj-busy-card {
+  background: #fff;
+  border-radius: 12px;
+  padding: 28px 36px 24px;
+  min-width: 340px; max-width: 520px;
+  box-shadow: 0 12px 48px rgba(0,0,0,0.28);
+  text-align: center;
+  font-family: inherit;
+}
+.qj-busy-spinner {
+  width: 44px; height: 44px;
+  border: 4px solid #e2e8ef;
+  border-top-color: #2c8c7e;
+  border-radius: 50%;
+  margin: 0 auto 16px;
+  animation: qjBusySpin .9s linear infinite;
+}
+.qj-busy-title {
+  font-size: 17px; font-weight: 600; color: #1f2937;
+  margin-bottom: 4px;
+}
+.qj-busy-sub {
+  font-size: 13px; color: #5a6573;
+  margin-bottom: 14px; line-height: 1.5;
+}
+.qj-busy-meta {
+  display: flex; justify-content: center; align-items: center;
+  gap: 8px;
+  font-size: 12px; color: #7a8594;
+  font-variant-numeric: tabular-nums;
+}
+.qj-busy-meta #qjBusyElapsed {
+  color: #2c8c7e; font-weight: 600; font-size: 13px;
+}
+.qj-busy-dot { color: #c9d1da; }
+.qj-busy-warn {
+  margin-top: 14px;
+  padding: 8px 12px;
+  background: #fff4d6;
+  border: 1px solid #d49a3a;
+  border-radius: 6px;
+  color: #8a5a00;
+  font-size: 12px;
+  line-height: 1.5;
+}
+@keyframes qjBusySpin {
+  to { transform: rotate(360deg); }
+}
+@keyframes qjBusyFade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
