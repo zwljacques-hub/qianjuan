@@ -2542,10 +2542,10 @@ def workflow_meta(state: dict[str, Any]) -> dict[str, Any]:
     if not state.get("chiefEditorPassed") and "committed" not in state.get("truthAfter", ""):
         if state.get("chiefEditorRequiresUser"):
             return {
-                "currentStep": "editor",
-                "primaryLabel": "总编打回,请人工决定",
-                "primaryEndpoint": "/api/editor/override",
-                "helperText": "总编两次审核仍不通过。请查看打分卡片和问题清单,人工决定是否放行或继续修改。",
+                "currentStep": "write",
+                "primaryLabel": "按总编批注重写本章",
+                "primaryEndpoint": "/api/editor/rewrite",
+                "helperText": "总编两次审核仍不通过。请点击重写让正文写手按总编批注重做,或在面板里选择人工放行。",
                 "steps": steps,
             }
         return {
@@ -3676,6 +3676,38 @@ def mutate(endpoint: str, body: dict[str, Any] | None = None) -> tuple[dict[str,
                    chapter=state["project"]["chapterNumber"],
                    message="用户人工通过")
         message = "已人工通过总编审核"
+
+    elif endpoint == "/api/editor/rewrite":
+        _require_active_project(state)
+        chapter_number = state["project"]["chapterNumber"]
+        review = state.get("editorReview") or {}
+        notes = (review.get("editorNotes") or "").strip()
+        if not notes:
+            issues = review.get("issues") or []
+            notes = "; ".join(
+                f"[{(it.get('severity') or 'minor')}] {(it.get('text') or '')}"
+                for it in issues[:6]
+                if it.get("text")
+            ) or "请按之前的审计意见和去 AI 味红线全面重写本章。"
+        _log_agent(state, "scene_writer", "revising", chapter=chapter_number,
+                   message=f"用户触发重写,带总编批注回到正文写手:{notes[:60]}")
+        ok, note = rewrite_scenes_with_editor_notes(state, notes)
+        if not ok:
+            _log_agent(state, "scene_writer", "failed", chapter=chapter_number,
+                       message=f"重写失败:{note}")
+            raise RuntimeError(f"重写失败:{note}")
+        _log_agent(state, "scene_writer", "done", chapter=chapter_number,
+                   message=f"重写完成:{note}")
+        # 重置审计/总编状态,流程退回到 audit
+        state["draftScore"] = 0
+        state["chiefEditorPassed"] = False
+        state["chiefEditorRequiresUser"] = False
+        state["editorReview"] = None
+        # 不清 revisionAttempts:保留计数让用户看到已经重写过几次
+        state["humanStyleReport"] = {"status": "pending", "chapterNumber": chapter_number}
+        state["directorDecision"] = "正文已按总编批注重写,等待重新审计"
+        add_trace(state, "Scene Writer", f"按总编批注重写本章:{note}")
+        message = f"已按总编批注重写本章 ({note}),请重新审计"
 
     elif endpoint == "/api/style/human-edit":
         _require_active_project(state)

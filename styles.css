@@ -2849,3 +2849,25 @@ button {
   from { opacity: 0; }
   to   { opacity: 1; }
 }
+
+
+/* ==== 总编打回 → 重写按钮(主按钮加粗) ==== */
+.editor-rewrite-btn {
+  background: linear-gradient(180deg, #2c8c7e, #1f6e62);
+  color: #fff;
+  font-weight: 600;
+  padding: 10px 18px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  box-shadow: 0 2px 6px rgba(44,140,126,0.32);
+  transition: transform .12s ease, box-shadow .12s ease;
+}
+.editor-rewrite-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(44,140,126,0.42);
+}
+.editor-rewrite-btn:active {
+  transform: translateY(0);
+}

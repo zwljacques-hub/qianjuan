@@ -1656,15 +1656,20 @@ function renderEditorReviewPanel() {
     </div>`;
   }
   const diagnoseBtn = `<button class="secondary-button" type="button" onclick="reRunDiagnostics()">🔬 重新诊断本章</button>`;
+  const rewriteBtn = `<button class="primary-button editor-rewrite-btn" type="button" onclick="rewriteByEditor()">✍️ 按总编批注重写本章 (跳回正文写手)</button>`;
   const buttons = requiresUser
     ? `<div class="editor-actions">
-        <button class="primary-button" type="button" onclick="overrideEditor()">人工通过, 继续流程</button>
-        <button class="secondary-button" type="button" onclick="reRunScenes()">重新生成正文</button>
+        ${rewriteBtn}
+        <button class="secondary-button" type="button" onclick="overrideEditor()">人工放行,跳过总编</button>
         ${diagnoseBtn}
       </div>`
     : (passed
         ? `<div class="editor-actions">${diagnoseBtn}</div>`
-        : `<div class="editor-actions"><button class="secondary-button" type="button" onclick="reRunEditor()">再审一次</button>${diagnoseBtn}</div>`);
+        : `<div class="editor-actions">
+            ${rewriteBtn}
+            <button class="secondary-button" type="button" onclick="reRunEditor()">再审一次</button>
+            ${diagnoseBtn}
+          </div>`);
   root.innerHTML = `<div class="editor-review-header">
     <span class="editor-title">📝 小说总编审核</span>
     ${actionBadge}
@@ -1685,6 +1690,10 @@ async function reRunEditor() {
 
 async function reRunScenes() {
   await mutate("/api/scenes/generate", {}, "重新生成本章正文");
+}
+
+async function rewriteByEditor() {
+  await mutate("/api/editor/rewrite", {}, "按总编批注重写本章");
 }
 
 async function reRunDiagnostics() {
@@ -2360,6 +2369,7 @@ init();
     '/api/audit/run':         {title: '正在审计章节',         sub: '检查连续性 / 体验 / 风格,通常 10-30 秒'},
     '/api/editor/review':     {title: '总编正在审稿',         sub: '不达标会自动重写,最多 3 轮,通常 30 秒 - 3 分钟'},
     '/api/editor/override':   {title: '记录人工通过',         sub: '处理中...'},
+    '/api/editor/rewrite':    {title: '正在按总编批注重写',   sub: '正文写手回炉再造,通常 30-90 秒'},
     '/api/revise/auto':       {title: '正在按审计建议修订',   sub: 'AI 调整问题段落,通常 10-20 秒'},
     '/api/style/run':         {title: '正在审校原创表达',     sub: '减少模板化和 AI 腔,通常 10-30 秒'},
     '/api/style/human-edit':  {title: '正在精修文笔',         sub: '深度打磨语言,通常 15-40 秒'},
