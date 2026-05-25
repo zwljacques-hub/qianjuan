@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import json
 import mimetypes
 import os
@@ -233,6 +234,7 @@ def _empty_state() -> dict[str, Any]:
         "agentTimeline": [],
         "revisionAttempts": {},
         "editorReview": None,
+        "editorScoreHistory": [],
         "chiefEditorPassed": False,
         "chiefEditorRequiresUser": False,
         "lastExportedChapter": 0,
@@ -440,6 +442,7 @@ def default_state() -> dict[str, Any]:
         "agentTimeline": [],
         "revisionAttempts": {},
         "editorReview": None,
+        "editorScoreHistory": [],
         "chiefEditorPassed": False,
         "chiefEditorRequiresUser": False,
         "lastExportedChapter": 0,
@@ -2033,6 +2036,23 @@ def rewrite_scenes_with_editor_notes(state: dict[str, Any], notes: str) -> tuple
         return False, f"重写失败:{exc}"
     returned = data.get("scenes") or []
     by_id = {item.get("id"): item for item in returned if isinstance(item, dict)}
+    # 空转检测:先用返回内容拼出新正文与旧正文做相似度比较, 防 LLM 复读原文
+    new_parts = []
+    for scene in state["scenes"]:
+        item = by_id.get(scene["id"])
+        if item and item.get("content"):
+            new_parts.append(str(item["content"]).strip())
+        else:
+            new_parts.append(scene.get("content", ""))
+    new_text = "\n\n".join(p for p in new_parts if p)
+    if new_text and prev_text:
+        similarity = difflib.SequenceMatcher(None, prev_text, new_text).ratio()
+    else:
+        similarity = 0.0
+    if similarity > 0.85:
+        _log_agent(state, "scene_writer", "failed", chapter=chapter_number,
+                   message=f"重写空转(相似度 {similarity:.0%}),LLM 复读原文")
+        return False, f"重写空转(新旧相似度 {similarity:.0%}),LLM 几乎没改"
     updated = 0
     for scene in state["scenes"]:
         item = by_id.get(scene["id"])
@@ -2044,7 +2064,7 @@ def rewrite_scenes_with_editor_notes(state: dict[str, Any], notes: str) -> tuple
         updated += 1
     if updated == 0:
         return False, "模型未返回可用重写内容"
-    return True, f"按批注重写 {updated} 个场景"
+    return True, f"按批注重写 {updated} 个场景 (相似度 {similarity:.0%})"
 
 
 def archive_current_chapter(state: dict[str, Any]) -> None:
@@ -2119,6 +2139,7 @@ def prepare_next_chapter(state: dict[str, Any]) -> dict[str, Any]:
     state["chiefEditorPassed"] = False
     state["chiefEditorRequiresUser"] = False
     state["editorReview"] = None
+    state["editorScoreHistory"] = []
     state["scores"] = [
         {"name": "连续性", "score": 0, "reason": f"等待第 {next_number} 章正文"},
         {"name": "读者体验", "score": 0, "reason": "等待正文生成"},
@@ -2195,6 +2216,7 @@ def create_project_state(body: dict[str, Any]) -> dict[str, Any]:
     state["agentTimeline"] = []
     state["revisionAttempts"] = {}
     state["editorReview"] = None
+    state["editorScoreHistory"] = []
     state["chiefEditorPassed"] = False
     state["chiefEditorRequiresUser"] = False
     state["plan"] = {
@@ -3390,6 +3412,8 @@ def mutate(endpoint: str, body: dict[str, Any] | None = None) -> tuple[dict[str,
         state["chiefEditorPassed"] = False
         state["chiefEditorRequiresUser"] = False
         state["editorReview"] = None
+        state["editorScoreHistory"] = []
+        state["revisionAttempts"][str(state["project"]["chapterNumber"])] = 0
         add_trace(state, "Scene Writer", llm_note or "按 Scene Cards 生成正文草稿。")
         state["lastLLMRun"] = {"used": llm_used, "note": llm_note, "model": get_llm_config("scene_writer").model if llm_used else None}
         message = "正文已生成"
@@ -3624,6 +3648,13 @@ def mutate(endpoint: str, body: dict[str, Any] | None = None) -> tuple[dict[str,
             state["editorReview"] = review
             action = review.get("action") or "revise"
             score = review.get("score") or 0
+            history = state.setdefault("editorScoreHistory", [])
+            history.append({
+                "round": loop_round,
+                "score": score,
+                "action": action,
+                "ts": datetime.now().strftime("%H:%M:%S"),
+            })
             current = attempts.get(key, 0)
             if action == "approve":
                 state["chiefEditorPassed"] = True
@@ -3703,7 +3734,8 @@ def mutate(endpoint: str, body: dict[str, Any] | None = None) -> tuple[dict[str,
         state["chiefEditorPassed"] = False
         state["chiefEditorRequiresUser"] = False
         state["editorReview"] = None
-        # 不清 revisionAttempts:保留计数让用户看到已经重写过几次
+        # 用户手动重写后, 把自动循环计数清零, 让下一轮总编审核重新有 2 次自动机会
+        state["revisionAttempts"][str(chapter_number)] = 0
         state["humanStyleReport"] = {"status": "pending", "chapterNumber": chapter_number}
         state["directorDecision"] = "正文已按总编批注重写,等待重新审计"
         add_trace(state, "Scene Writer", f"按总编批注重写本章:{note}")

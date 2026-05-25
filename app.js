@@ -1675,9 +1675,41 @@ function renderEditorReviewPanel() {
     ${actionBadge}
     ${review.model ? `<span class="editor-model">${escapeAttr(review.model)}</span>` : ""}
   </div>
+  ${renderEditorScoreTrend()}
   ${review.editorNotes ? `<div class="editor-notes">总编批注：${escapeAttr(review.editorNotes)}</div>` : ""}
+  ${metricsHtml}
   ${issues ? `<ul class="editor-issues">${issues}</ul>` : ""}
   ${buttons}`;
+}
+
+function renderEditorScoreTrend() {
+  const history = (appState && appState.editorScoreHistory) || [];
+  if (!history.length) return "";
+  const dots = history.map((h, i) => {
+    const prev = i > 0 ? history[i - 1].score : null;
+    const delta = prev != null ? h.score - prev : 0;
+    const cls = prev == null ? "flat" : (delta > 0 ? "up" : (delta < 0 ? "down" : "flat"));
+    const sign = delta > 0 ? `+${delta}` : `${delta}`;
+    const arrow = prev == null ? "" : (delta > 0 ? "⬆" : (delta < 0 ? "⬇" : "→"));
+    const tag = h.action === "approve" ? "✓过审" : (h.action === "reject" ? "✗驳回" : "打回");
+    return `<span class="editor-trend-dot trend-${cls}" title="第 ${h.round} 轮 · ${tag} · ${h.ts || ''}">
+      <b>${h.score}</b>${prev != null ? `<i>${arrow}${sign}</i>` : ""}
+    </span>`;
+  }).join('<span class="editor-trend-sep">→</span>');
+  let summary = "";
+  if (history.length >= 2) {
+    const first = history[0].score;
+    const last = history[history.length - 1].score;
+    const total = last - first;
+    if (total > 0) summary = `共涨 +${total} 分,重写有效`;
+    else if (total < 0) summary = `共跌 ${total} 分,方向走偏`;
+    else summary = `${history.length} 轮原地踏步,建议人工介入`;
+  }
+  return `<div class="editor-trend">
+    <span class="editor-trend-label">审分历程:</span>
+    ${dots}
+    ${summary ? `<span class="editor-trend-summary">${summary}</span>` : ""}
+  </div>`;
 }
 
 async function overrideEditor() {

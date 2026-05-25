@@ -2871,3 +2871,38 @@ button {
 .editor-rewrite-btn:active {
   transform: translateY(0);
 }
+
+/* 总编审分历程 trend bar */
+.editor-trend {
+  display: flex; align-items: center; gap: 6px;
+  flex-wrap: wrap;
+  margin: 8px 0 12px;
+  padding: 8px 10px;
+  background: #f5f7fa;
+  border: 1px solid #e3e7ec;
+  border-radius: 6px;
+  font-size: 12px;
+}
+.editor-trend-label { color: #5a6573; font-weight: 600; }
+.editor-trend-dot {
+  display: inline-flex; align-items: baseline; gap: 3px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: #fff;
+  border: 1px solid #d6dde6;
+  font-variant-numeric: tabular-nums;
+}
+.editor-trend-dot b { font-weight: 600; color: #2c3340; }
+.editor-trend-dot i { font-style: normal; font-size: 11px; }
+.editor-trend-dot.trend-up    { background: #e6f7f3; border-color: #2c8c7e; }
+.editor-trend-dot.trend-up i  { color: #2c8c7e; }
+.editor-trend-dot.trend-down  { background: #fbeae7; border-color: #c0392b; }
+.editor-trend-dot.trend-down i{ color: #c0392b; }
+.editor-trend-dot.trend-flat  { background: #fff4d6; border-color: #d49a3a; }
+.editor-trend-dot.trend-flat i{ color: #d49a3a; }
+.editor-trend-sep { color: #aab; }
+.editor-trend-summary {
+  margin-left: auto;
+  color: #5a6573;
+  font-style: italic;
+}
