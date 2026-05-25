@@ -235,6 +235,7 @@ def _empty_state() -> dict[str, Any]:
         "revisionAttempts": {},
         "editorReview": None,
         "editorScoreHistory": [],
+        "autoFixLog": [],
         "chiefEditorPassed": False,
         "chiefEditorRequiresUser": False,
         "lastExportedChapter": 0,
@@ -443,6 +444,7 @@ def default_state() -> dict[str, Any]:
         "revisionAttempts": {},
         "editorReview": None,
         "editorScoreHistory": [],
+        "autoFixLog": [],
         "chiefEditorPassed": False,
         "chiefEditorRequiresUser": False,
         "lastExportedChapter": 0,
@@ -1838,16 +1840,42 @@ def chief_editor_review(state: dict[str, Any], chapter_number: int) -> dict[str,
         "\n  - 平均句长 <14 字(过碎)或 >35 字(过长)"
         "\n  - 形容词堆砌/空泛情绪命名词过多"
         "\n三级问题(minor):字数±5%、流派调性微调、canon 边角矛盾"
+        "\n【关键】除了 issues,你必须额外输出 patches[],把每个问题精确定位到 scene_id + paragraph_idx,"
+        "让写手做局部微改而不是整章重写。规则:"
+        "\n  - 每个 patch 必须给出 {patch_id,scene_id,paragraph_idx,original_excerpt,issue_type,severity,repair_strategy}"
+        "\n  - scene_id 来自 user payload 的 scenes_with_paragraphs[].id"
+        "\n  - paragraph_idx 来自 user payload 的 scenes_with_paragraphs[].paragraphs[].idx(0-based)"
+        "\n  - original_excerpt 是该段前 30 字,用于校对"
+        "\n  - repair_strategy 必须是可执行的句级指引(80 字内,如'把这段三个短句并成一段,主角加一句反问对白')"
+        "\n  - patches 上限 5 条:blocker 必须全列;major+minor 合计 ≤3 条;优先级 blocker>major>minor"
+        "\n  - issue_type 限定:hook/单句成段/对话稀少/雷区词/升华句式/字数/canon冲突/调性/其他"
         "\n严格输出 schema:"
         "\n{\"score\":number(0-100),\"passed\":boolean,"
         "\"issues\":[{\"severity\":\"blocker\"|\"major\"|\"minor\",\"category\":string,"
         "\"text\":string,\"suggestion\":string}],"
+        "\"patches\":[{\"patch_id\":string,\"scene_id\":string,\"paragraph_idx\":number,"
+        "\"original_excerpt\":string,\"issue_type\":string,\"severity\":\"blocker\"|\"major\"|\"minor\","
+        "\"repair_strategy\":string}],"
         "\"action\":\"approve\"|\"revise\"|\"reject\",\"editorNotes\":string}"
         "\n判定:有任何 blocker → revise;有 ≥2 major → revise;只有 minor 且 score≥75 → approve;"
         "彻底跑题/canon 严重冲突 → reject。"
         "editorNotes 必须给写手【可执行的句级修改指引】,例如"
         "'把第 2 段三个短句合并成一段,加入主角的反问对话',不少于 80 字。"
     )
+    # 给总编打段落级"指针",让 patch 能精确定位
+    scenes_with_paragraphs = []
+    for sc in scenes:
+        if not sc.get("content"):
+            continue
+        paras = [p.strip() for p in re.split(r"\n\n+", sc["content"]) if p.strip()]
+        scenes_with_paragraphs.append({
+            "id": sc.get("id"),
+            "title": sc.get("title"),
+            "paragraphs": [
+                {"idx": i, "preview": (p[:40] + ("…" if len(p) > 40 else "")), "len": len(p)}
+                for i, p in enumerate(paras)
+            ],
+        })
     user = json.dumps({
         "chapterNumber": chapter_number,
         "chapterTitle": state["project"].get("chapterTitle"),
@@ -1863,6 +1891,7 @@ def chief_editor_review(state: dict[str, Any], chapter_number: int) -> dict[str,
             "chapter_hook_coverage": 0.69,
             "ai_blacklist_total_p50": 1,
         },
+        "scenes_with_paragraphs": scenes_with_paragraphs,
         "text": text[:8000],
         "genre": state.get("project", {}).get("genre", ""),
         "genreLabel": state.get("project", {}).get("genreLabel", ""),
@@ -2140,6 +2169,7 @@ def prepare_next_chapter(state: dict[str, Any]) -> dict[str, Any]:
     state["chiefEditorRequiresUser"] = False
     state["editorReview"] = None
     state["editorScoreHistory"] = []
+    state["autoFixLog"] = []
     state["scores"] = [
         {"name": "连续性", "score": 0, "reason": f"等待第 {next_number} 章正文"},
         {"name": "读者体验", "score": 0, "reason": "等待正文生成"},
@@ -2217,6 +2247,7 @@ def create_project_state(body: dict[str, Any]) -> dict[str, Any]:
     state["revisionAttempts"] = {}
     state["editorReview"] = None
     state["editorScoreHistory"] = []
+    state["autoFixLog"] = []
     state["chiefEditorPassed"] = False
     state["chiefEditorRequiresUser"] = False
     state["plan"] = {
@@ -2929,6 +2960,336 @@ def compute_de_ai_metrics(text: str) -> dict[str, Any]:
     }
 
 
+# ---- 去 AI 味:代码自修(在 LLM 之前先清掉硬规则可修的部分)----
+# 雷区词替换字典 — key=原词, value=替换 (空字符串=直接删除)
+# 设计原则:能删则删,需要保留语义的换成具体口语化词
+_DE_AI_REPLACEMENTS: dict[str, str] = {
+    # 全删:无语义贡献的 AI 口吻填充词
+    "不禁": "", "不由得": "", "不由分说": "", "不约而同": "",
+    "深深地": "", "深邃": "", "油然而生": "",
+    "心头一震": "", "心中一凛": "",
+    "复杂的情感": "", "难以言喻": "",
+    "在这一刻": "", "在某种意义上": "", "从某种角度": "",
+    "一般而言": "", "总而言之": "", "综上所述": "",
+    "值得一提": "", "毫无疑问": "", "不可否认": "", "众所周知": "",
+    "可以说是": "",
+    "随即": "", "顿时": "", "瞬间": "", "一时间": "",
+    "片刻之后": "",
+    "蕴含着": "", "彰显": "", "透露出一种": "",
+    "仿佛一切": "", "似乎一切": "", "整个世界": "",
+    # 替换成更具体/口语化
+    "然而": "可", "与此同时": "同时",
+    "令人": "", "宛若": "像", "正如": "像",
+    "映衬": "衬", "与其说": "",
+    "就如同": "像", "恰如": "像",
+}
+
+# 升华/比喻句式 — 整句删除(包括前后逗号到句号的整句)
+_DE_AI_SUBLIMATION_REGEX: tuple = (
+    re.compile(r"[^。！？!?\n]*?并非[^。！？!?\n]{0,30}?而是[^。！？!?\n]*?[。！？!?]"),
+    re.compile(r"[^。！？!?\n]*?不仅[^。！？!?\n]{0,30}?更[^。！？!?\n]*?[。！？!?]"),
+    re.compile(r"[^。！？!?\n]*?不仅仅[^。！？!?\n]{0,30}?还[^。！？!?\n]*?[。！？!?]"),
+    re.compile(r"[^。！？!?\n]*?与其说[^。！？!?\n]{0,30}?不如说[^。！？!?\n]*?[。！？!?]"),
+    re.compile(r"[^。！？!?\n]*?就如同[^。！？!?\n]{0,30}?一般[^。！？!?\n]*?[。！？!?]"),
+    re.compile(r"[^。！？!?\n]*?恰如[^。！？!?\n]{0,30}?一般[^。！？!?\n]*?[。！？!?]"),
+    re.compile(r"[^。！？!?\n]*?仿佛[^。！？!?\n]{0,30}?一般[^。！？!?\n]*?[。！？!?]"),
+)
+
+# 章末钩子词(扩展自 _DE_AI_HOOK_WORDS)
+_CHAPTER_HOOK_MARKERS: tuple = (
+    "?", "!", "？", "！", "…", "...",
+    "竟然", "不料", "突然", "猛地", "下一刻", "却见",
+    "岂料", "蓦地", "蓦然", "霎时", "陡然", "骤然",
+    "哪知", "谁知", "不曾想", "想不到", "竟", "怎么会",
+)
+
+
+def _strip_extra_punct(text: str) -> str:
+    """清掉替换后留下的连续标点 / 行首孤立标点。"""
+    text = re.sub(r"，{2,}", "，", text)
+    text = re.sub(r"，([。！？!?…])", r"\1", text)
+    text = re.sub(r"^[，、 \t]+", "", text, flags=re.MULTILINE)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _log_auto_fix(state: dict[str, Any], fix_type: str, detail: dict | str) -> None:
+    """把自修动作写入 state.autoFixLog,前端能看到代码改了什么。"""
+    log = state.setdefault("autoFixLog", [])
+    log.append({
+        "ts": datetime.now().strftime("%H:%M:%S"),
+        "chapter": state.get("project", {}).get("chapterNumber"),
+        "type": fix_type,
+        "detail": detail,
+    })
+    # 截断保留最近 30 条
+    if len(log) > 30:
+        state["autoFixLog"] = log[-30:]
+
+
+def auto_fix_hard_rules(state: dict[str, Any]) -> dict[str, Any]:
+    """LLM 之前用代码清掉硬规则违例:雷区词 / 升华句 / 短段。
+    返回执行摘要 dict。
+    """
+    summary = {
+        "blacklist_replaced": 0,
+        "blacklist_details": {},
+        "sublimation_removed": 0,
+        "short_paragraphs_merged": 0,
+        "scenes_touched": 0,
+    }
+    scenes = state.get("scenes") or []
+    for scene in scenes:
+        text = scene.get("content") or ""
+        if not text:
+            continue
+        original = text
+
+        # 1. 雷区词替换
+        for word, replacement in _DE_AI_REPLACEMENTS.items():
+            count = text.count(word)
+            if count > 0:
+                text = text.replace(word, replacement)
+                summary["blacklist_replaced"] += count
+                summary["blacklist_details"][word] = summary["blacklist_details"].get(word, 0) + count
+
+        # 2. 升华句整句删
+        for pattern in _DE_AI_SUBLIMATION_REGEX:
+            matches = pattern.findall(text)
+            if matches:
+                text = pattern.sub("", text)
+                summary["sublimation_removed"] += len(matches)
+
+        # 3. 清扫替换后的标点残留
+        text = _strip_extra_punct(text)
+
+        # 4. 短段合并(< 15 字且不含钩子标点/对话引号的段,跟下一段并)
+        paragraphs = [p.strip() for p in re.split(r"\n\n+", text) if p.strip()]
+        merged: list[str] = []
+        for p in paragraphs:
+            if merged and len(merged[-1]) < 15:
+                last = merged[-1]
+                ends_with_hook = any(last.endswith(m) for m in ("?", "!", "？", "！", "…"))
+                has_dialog = any(m in last for m in _DE_AI_DIALOG_MARKS)
+                if not ends_with_hook and not has_dialog:
+                    merged[-1] = last + p
+                    summary["short_paragraphs_merged"] += 1
+                    continue
+            merged.append(p)
+        text = "\n\n".join(merged)
+
+        if text != original:
+            scene["content"] = text
+            scene["words"] = len(text)
+            scene["wordsNoPunct"] = count_chars_no_punct(text)
+            summary["scenes_touched"] += 1
+
+    if summary["blacklist_replaced"] or summary["sublimation_removed"] or summary["short_paragraphs_merged"]:
+        _log_auto_fix(state, "hard_rules", {
+            "blacklist": summary["blacklist_replaced"],
+            "blacklist_top": dict(list(summary["blacklist_details"].items())[:5]),
+            "sublimation": summary["sublimation_removed"],
+            "short_para_merged": summary["short_paragraphs_merged"],
+            "scenes_touched": summary["scenes_touched"],
+        })
+    return summary
+
+
+def auto_fix_chapter_hook(state: dict[str, Any]) -> tuple[bool, str]:
+    """末段不含钩子时,只调写手重写最后一段。整章其余不动。"""
+    scenes = state.get("scenes") or []
+    if not scenes:
+        return False, "无场景"
+    last_scene = scenes[-1]
+    content = last_scene.get("content") or ""
+    paragraphs = [p.strip() for p in re.split(r"\n\n+", content) if p.strip()]
+    if not paragraphs:
+        return False, "末场景为空"
+    last_para = paragraphs[-1]
+    if any(m in last_para for m in _CHAPTER_HOOK_MARKERS):
+        return False, "已有钩子,无需修"
+
+    config = get_llm_config("scene_writer")
+    if not config.configured:
+        return False, "未配置写手"
+
+    chapter_number = state["project"]["chapterNumber"]
+    system = (
+        "你是中文网文写手。任务是【只把给定的最后一段改写成带强钩子的章末段】。"
+        "钩子要求:含疑问句/惊叹/省略号,或'竟然/不料/突然/猛地/却见/下一刻'等转折词;"
+        "留下一个未解开的事件、未到的人、或主角一句反应性独白。"
+        "字数与原段相近(±50%),不要堆砌形容词,不要总结升华。"
+        "禁用词:然而/不禁/不由得/油然而生/心头一震/深深地/宛若/正如/与此同时。"
+        "只输出 JSON: {\"new_paragraph\":string}。"
+    )
+    user = json.dumps({
+        "original_last_paragraph": last_para,
+        "scene_summary": last_scene.get("summary", ""),
+        "chapter_title": state.get("project", {}).get("chapterTitle", ""),
+    }, ensure_ascii=False)
+    try:
+        data = chat_json(system, user, temperature=0.7, timeout=45, agent="scene_writer")
+    except Exception as exc:  # noqa: BLE001
+        _log_agent(state, "scene_writer", "failed", chapter=chapter_number,
+                   message=f"章末钩子修复失败:{str(exc)[:80]}")
+        return False, f"LLM 调用失败:{exc}"
+    new_para = (data.get("new_paragraph") or "").strip()
+    if not new_para:
+        return False, "模型未返回新段"
+    if not any(m in new_para for m in _CHAPTER_HOOK_MARKERS):
+        return False, "改写后仍无钩子"
+
+    paragraphs[-1] = new_para
+    last_scene["content"] = "\n\n".join(paragraphs)
+    last_scene["words"] = len(last_scene["content"])
+    last_scene["wordsNoPunct"] = count_chars_no_punct(last_scene["content"])
+    _log_auto_fix(state, "chapter_hook", {
+        "before": last_para[:80],
+        "after": new_para[:80],
+    })
+    return True, new_para[:60]
+
+
+def apply_editor_patches(state: dict[str, Any], patches: list[dict]) -> tuple[bool, str]:
+    """按总编 patch 列表逐条修,只动 patch 命中的段落。
+    每个 patch 给 LLM 80 字左右的创意空间,大幅降低复读 / 失败率。
+    """
+    if not patches:
+        return False, "无 patch"
+    config = get_llm_config("scene_writer")
+    if not config.configured:
+        return False, "未配置写手"
+    chapter_number = state["project"]["chapterNumber"]
+
+    by_scene: dict[str, list[dict]] = {}
+    for p in patches:
+        sid = p.get("scene_id")
+        if sid:
+            by_scene.setdefault(sid, []).append(p)
+    if not by_scene:
+        return False, "patches 无有效 scene_id"
+
+    total_target = len(patches)
+    applied = 0
+    spin_count = 0
+
+    for scene in state["scenes"]:
+        scene_patches = by_scene.get(scene["id"], [])
+        if not scene_patches:
+            continue
+
+        paragraphs = [p.strip() for p in re.split(r"\n\n+", scene.get("content") or "") if p.strip()]
+        if not paragraphs:
+            continue
+
+        targets = []
+        for p in scene_patches:
+            idx = p.get("paragraph_idx")
+            if not isinstance(idx, int) or idx < 0 or idx >= len(paragraphs):
+                continue
+            targets.append({
+                "patch_id": p.get("patch_id") or f"p{len(targets)+1}",
+                "paragraph_idx": idx,
+                "original": paragraphs[idx],
+                "issue_type": p.get("issue_type", ""),
+                "severity": p.get("severity", "major"),
+                "repair_strategy": p.get("repair_strategy", "按总编要求修复"),
+            })
+        if not targets:
+            continue
+
+        # 上下文:目标段 + 前后各 1 段
+        ctx_indices: set[int] = set()
+        for t in targets:
+            ctx_indices.add(t["paragraph_idx"])
+            if t["paragraph_idx"] > 0:
+                ctx_indices.add(t["paragraph_idx"] - 1)
+            if t["paragraph_idx"] < len(paragraphs) - 1:
+                ctx_indices.add(t["paragraph_idx"] + 1)
+        ctx = [
+            {
+                "idx": i,
+                "text": paragraphs[i],
+                "is_target": i in {t["paragraph_idx"] for t in targets},
+            }
+            for i in sorted(ctx_indices)
+        ]
+
+        system = (
+            "你是中文网文写手。任务是【按总编 patch 修复指定段落】。"
+            "只改 is_target=true 的段落,is_target=false 的段落是给你看上下文。"
+            "每个 patch 只动那一段,字数与原段 ±30%,保留剧情和人物关系。"
+            "\n【去 AI 味红线 - 违反 = 该 patch 视为失败】:"
+            "\n  - 禁用词:不禁/不由得/深深地/然而/与此同时/在这一刻/令人/宛若/正如/"
+            "心头一震/油然而生/随即/顿时/瞬间/一时间;"
+            "\n  - 禁用句式:并非...而是/不仅...更/宛若...一般/与其说...不如说;"
+            "\n  - 是末段必含钩子:?! 或'竟然/不料/突然/猛地'等;"
+            "\n  - 不要每句一段,短句要并;不要堆形容词;尽量用具体动作和对白。"
+            "\n只输出 JSON: {\"patches\":[{\"patch_id\":string,\"new_paragraph\":string}]}。"
+        )
+        user = json.dumps({
+            "scene_id": scene["id"],
+            "scene_summary": scene.get("summary", ""),
+            "context": ctx,
+            "targets": [
+                {
+                    "patch_id": t["patch_id"],
+                    "paragraph_idx": t["paragraph_idx"],
+                    "issue_type": t["issue_type"],
+                    "severity": t["severity"],
+                    "repair_strategy": t["repair_strategy"],
+                    "original": t["original"],
+                }
+                for t in targets
+            ],
+        }, ensure_ascii=False)
+        try:
+            data = chat_json(system, user, temperature=0.6, timeout=60, agent="scene_writer")
+        except Exception as exc:  # noqa: BLE001
+            _log_agent(state, "scene_writer", "failed", chapter=chapter_number,
+                       message=f"patch {scene['id']}: {str(exc)[:80]}")
+            continue
+
+        returned = data.get("patches") or []
+        by_pid: dict[str, str] = {}
+        for p in returned:
+            if isinstance(p, dict) and p.get("patch_id"):
+                by_pid[p["patch_id"]] = (p.get("new_paragraph") or "").strip()
+
+        new_paragraphs = list(paragraphs)
+        scene_applied = 0
+        for t in targets:
+            new_text = by_pid.get(t["patch_id"], "")
+            if not new_text:
+                continue
+            # 空转检测:相似度 > 90% 视为复读
+            similarity = difflib.SequenceMatcher(None, t["original"], new_text).ratio()
+            if similarity > 0.90:
+                spin_count += 1
+                continue
+            new_paragraphs[t["paragraph_idx"]] = new_text
+            scene_applied += 1
+
+        if scene_applied > 0:
+            scene["content"] = "\n\n".join(new_paragraphs)
+            scene["words"] = len(scene["content"])
+            scene["wordsNoPunct"] = count_chars_no_punct(scene["content"])
+            applied += scene_applied
+
+    if applied > 0:
+        _log_auto_fix(state, "editor_patches", {
+            "applied": applied,
+            "total": total_target,
+            "spin": spin_count,
+        })
+        note = f"应用 {applied}/{total_target} 个 patch"
+        if spin_count:
+            note += f" (空转 {spin_count})"
+        return True, note
+    return False, f"0/{total_target} patch 应用成功"
+
+
 def generate_scene_contents_optional_llm(state: dict[str, Any]) -> tuple[bool, str]:
     config = get_llm_config("scene_writer")
     if not config.configured:
@@ -3413,6 +3774,7 @@ def mutate(endpoint: str, body: dict[str, Any] | None = None) -> tuple[dict[str,
         state["chiefEditorRequiresUser"] = False
         state["editorReview"] = None
         state["editorScoreHistory"] = []
+        state["autoFixLog"] = []
         state["revisionAttempts"][str(state["project"]["chapterNumber"])] = 0
         add_trace(state, "Scene Writer", llm_note or "按 Scene Cards 生成正文草稿。")
         state["lastLLMRun"] = {"used": llm_used, "note": llm_note, "model": get_llm_config("scene_writer").model if llm_used else None}
@@ -3635,6 +3997,16 @@ def mutate(endpoint: str, body: dict[str, Any] | None = None) -> tuple[dict[str,
         MAX_REVISIONS = 2  # 最多两次自动重写
         message = ""
         review = None
+
+        # 进入循环前先做一次"代码层硬规则修复" — 能批量修的不调 LLM
+        # (雷区词替换 / 升华句删除 / 短段合并 / 多余标点清理)
+        pre_fix = auto_fix_hard_rules(state)
+        # 章末钩子专项:只在缺钩子时调 1 次 LLM 重写末段
+        hook_ok, hook_note = auto_fix_chapter_hook(state)
+        if hook_ok:
+            _log_agent(state, "scene_writer", "done", chapter=chapter_number,
+                       message=f"章末钩子局部重写:{hook_note}")
+
         for loop_round in range(1, MAX_REVISIONS + 2):
             review = chief_editor_review(state, chapter_number)
             if not review:
@@ -3669,15 +4041,27 @@ def mutate(endpoint: str, body: dict[str, Any] | None = None) -> tuple[dict[str,
                            message=f"{current+1} 次审核仍不通过,需要人工介入")
                 message = f"总编 {current+1} 次审核仍不通过 ({score}/100),请人工决定"
                 break
-            # 自动重写 1 次
+            # 自动重写 1 次:优先用 patches 微改,失败再退回整章重写
             attempts[key] = current + 1
-            _log_agent(state, "scene_writer", "revising", chapter=chapter_number,
-                       message=f"按总编批注重写 (第 {current+1} 次)")
-            ok, note = rewrite_scenes_with_editor_notes(state, review.get("editorNotes", ""))
+            patches = review.get("patches") or []
+            ok = False
+            note = ""
+            if patches:
+                _log_agent(state, "scene_writer", "revising", chapter=chapter_number,
+                           message=f"按总编 {len(patches)} 条 patch 微改 (第 {current+1} 次)")
+                ok, note = apply_editor_patches(state, patches)
+            if not ok:
+                # patches 路径未生效:退回整章重写(带 editorNotes)
+                _log_agent(state, "scene_writer", "revising", chapter=chapter_number,
+                           message=f"patch 微改未成功,改走整章重写 (第 {current+1} 次)")
+                ok, note = rewrite_scenes_with_editor_notes(state, review.get("editorNotes", ""))
             if not ok:
                 state["chiefEditorRequiresUser"] = True
                 message = f"总编打回但自动重写失败 ({note}),请人工介入"
                 break
+            # 重写后再跑一次硬规则修复 — 确保 LLM 没把雷区词又写回来
+            auto_fix_hard_rules(state)
+            auto_fix_chapter_hook(state)
             _log_agent(state, "scene_writer", "done", chapter=chapter_number,
                        message=f"重写完成:{note}")
             # 重写后清审计分,但不退出循环 — 直接再走 chief_editor

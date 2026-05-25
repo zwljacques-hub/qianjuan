@@ -2906,3 +2906,43 @@ button {
   color: #5a6573;
   font-style: italic;
 }
+
+/* —— 代码自修轨迹 —— */
+.editor-autofix {
+  margin: 10px 0;
+  padding: 10px 12px;
+  background: linear-gradient(180deg, #fffaf3, #fff4dc);
+  border: 1px solid #e6d39a;
+  border-left: 3px solid #d49a3a;
+  border-radius: 8px;
+}
+.editor-autofix-title {
+  font-size: 12px;
+  color: #8a6418;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.autofix-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.autofix-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12.5px;
+  color: #3a3833;
+  line-height: 1.5;
+  padding: 4px 6px;
+  background: rgba(255, 255, 255, 0.6);
+  border-radius: 4px;
+}
+.autofix-icon { font-size: 14px; }
+.autofix-ts { color: #9a8a6a; font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+.autofix-label { color: #6b4f12; font-weight: 600; min-width: 130px; }
+.autofix-body { color: #4a4640; flex: 1; }
+.autofix-detail { color: #9a7a3a; font-size: 11px; }

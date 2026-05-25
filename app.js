@@ -1676,10 +1676,58 @@ function renderEditorReviewPanel() {
     ${review.model ? `<span class="editor-model">${escapeAttr(review.model)}</span>` : ""}
   </div>
   ${renderEditorScoreTrend()}
+  ${renderAutoFixLog()}
   ${review.editorNotes ? `<div class="editor-notes">总编批注：${escapeAttr(review.editorNotes)}</div>` : ""}
   ${metricsHtml}
   ${issues ? `<ul class="editor-issues">${issues}</ul>` : ""}
   ${buttons}`;
+}
+
+function renderAutoFixLog() {
+  const log = (appState && appState.autoFixLog) || [];
+  if (!log.length) return "";
+  // 聚合最近一轮 (按时间倒序取直到遇到上一章) — 简化:展示最近 8 条
+  const recent = log.slice(-8);
+  const items = recent.map((entry) => {
+    const t = entry.type;
+    const d = entry.detail || {};
+    let icon = "🔧";
+    let label = t;
+    let body = "";
+    if (t === "hard_rules") {
+      icon = "🧹";
+      label = "代码硬规则修复";
+      const parts = [];
+      if (d.blacklist) parts.push(`雷区词 ×${d.blacklist}`);
+      if (d.sublimation) parts.push(`升华句 ×${d.sublimation}`);
+      if (d.short_para_merged) parts.push(`短段合并 ×${d.short_para_merged}`);
+      body = parts.join(" / ");
+      if (d.blacklist_top && Object.keys(d.blacklist_top).length) {
+        const top = Object.entries(d.blacklist_top).slice(0, 4)
+          .map(([k, v]) => `${k}×${v}`).join(", ");
+        body += ` <span class="autofix-detail">[${top}]</span>`;
+      }
+    } else if (t === "chapter_hook") {
+      icon = "🎣";
+      label = "章末钩子重写";
+      body = `${escapeAttr((d.before || "").slice(0, 30))}… → ${escapeAttr((d.after || "").slice(0, 30))}…`;
+    } else if (t === "editor_patches") {
+      icon = "✂️";
+      label = "总编 patch 微改";
+      body = `应用 ${d.applied || 0}/${d.total || 0}`;
+      if (d.spin) body += ` (空转 ${d.spin})`;
+    }
+    return `<li class="autofix-item">
+      <span class="autofix-icon">${icon}</span>
+      <span class="autofix-ts">${entry.ts || ""}</span>
+      <span class="autofix-label">${label}</span>
+      <span class="autofix-body">${body}</span>
+    </li>`;
+  }).join("");
+  return `<div class="editor-autofix">
+    <div class="editor-autofix-title">🛠️ 代码自修轨迹(LLM 之前先按硬规则修)</div>
+    <ul class="autofix-list">${items}</ul>
+  </div>`;
 }
 
 function renderEditorScoreTrend() {
