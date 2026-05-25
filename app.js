@@ -1716,6 +1716,15 @@ function renderAutoFixLog() {
       label = "总编 patch 微改";
       body = `应用 ${d.applied || 0}/${d.total || 0}`;
       if (d.spin) body += ` (空转 ${d.spin})`;
+    } else if (t === "anti_copy_retry") {
+      icon = "🔁";
+      label = "整章反复读重试";
+      const ok = d.ok ? "✓ 通过" : "✗ 仍复读";
+      body = `首轮 ${Math.round((d.first_similarity || 0) * 100)}% → retry ${Math.round((d.retry_similarity || 0) * 100)}% (阈值 ${Math.round((d.threshold || 0.78) * 100)}%) · ${ok}`;
+    } else if (t === "anti_copy_retry_patch") {
+      icon = "🔁";
+      label = "段级反复读重试";
+      body = `scene ${d.scene_id || ""}:首空转 ${d.first_spin || 0} → retry 应用 ${d.retry_applied || 0} / 空转 ${d.retry_spin || 0}`;
     }
     return `<li class="autofix-item">
       <span class="autofix-icon">${icon}</span>

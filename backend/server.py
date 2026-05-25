@@ -2001,71 +2001,116 @@ def chief_editor_review(state: dict[str, Any], chapter_number: int) -> dict[str,
 
 
 def rewrite_scenes_with_editor_notes(state: dict[str, Any], notes: str) -> tuple[bool, str]:
-    """按小说总编的批注重写本章场景。复用 scene_writer 路径,但 prompt 注入 editorNotes。"""
+    """按小说总编的批注重写本章场景。复用 scene_writer 路径,但 prompt 注入 editorNotes。
+    内置 anti-copy:首次相似度 > 0.78 直接 retry 一次(温度拉到 0.95 + 禁用原句 + 改写指令),
+    第二次仍复读才 fail。
+    """
     config = get_llm_config("scene_writer")
     if not config.configured:
         return False, "未配置写手模型,无法按批注重写"
     chapter_number = state["project"]["chapterNumber"]
-    # 提取上一版正文的实测度量,塞给写手做参照
+    # 提取上一版正文的实测度量 + 前 6 句"禁用原句",给 LLM 做反复读约束
     prev_text = "\n\n".join(s.get("content", "") for s in state.get("scenes", []) if s.get("content"))
     prev_de_ai = compute_de_ai_metrics(prev_text)
-    system = (
-        "你是中文网文连载写手,文风以七猫/起点/番茄爆款为标尺。当前任务是【按总编批注重写本章】。"
-        "只输出 JSON,不要 Markdown。"
-        "严格遵循总编批注 editorNotes,针对问题点逐一修正,但保留剧情走向和场景结构。"
-        "\n【字数】每场景 targetWords 指不含标点中文字数,全章 2000-2500 字,严禁低于 2000 或高于 2500。"
-        "\n【去 AI 味结构红线】(必须满足,违反等于本次重写失败):"
-        "\n  1. 末场景结尾必须有钩子:疑问/惊叹/省略号或'竟然/不料/突然/猛地'转折词;"
-        "\n  2. 单句成段率 ≤ 65%:相邻短句要合并;"
-        "\n  3. 含引号对话段比例 ≥ 30%:加入直接对白;"
-        "\n  4. 平均句长 16-25 字。"
-        "\n【AI 雷区词禁用】然而/与此同时/在这一刻/令人/不由得/不禁/深深地/油然而生/心头一震/宛若/正如 等,"
-        "出现即必须改写。"
-        "\n【升华句式禁用】不要'并非...而是'/'不仅...更...'/'宛若...一般'。"
-        "\n请对照上一版的实测 prevDeAiMetrics,把没达标的指标拉回来。"
-    )
-    user = json.dumps({
-        "isRewrite": True,
-        "editorNotes": notes,
-        "prevDeAiMetrics": prev_de_ai,
-        "deAiTargets": {
-            "single_sent_para_ratio_max": 0.65,
-            "dialog_para_ratio_min": 0.30,
-            "sent_avg_min": 16,
-            "sent_avg_max": 25,
-            "ai_blacklist_max": 1,
-            "sublimation_max": 1,
-            "chapter_hook_required": True,
-        },
-        "project": state["project"],
-        "plan": state["plan"],
-        "character": state["characters"]["suHan"],
-        "memory": state["memory"],
-        "hooks": state["hooks"],
-        "scenes": [
-            {
-                "id": scene["id"],
-                "title": scene["title"],
-                "type": scene["type"],
-                "summary": scene["summary"],
-                "previousContent": scene.get("content", ""),
-                "targetWords": min(max(scene.get("words", 700), 400), 1100),
-            }
-            for scene in state["scenes"]
-        ],
-        "required_schema": {
-            "scenes": [{"id": "scene_01", "content": "string"}]
-        },
-    }, ensure_ascii=False)
-    try:
-        data = chat_json(system, user, temperature=0.7, timeout=120, agent="scene_writer")
-    except Exception as exc:  # noqa: BLE001
+    # 抽取上一版每个场景的前 2 句作为"禁用复读样本"
+    forbidden_lines: list[str] = []
+    for scene in state.get("scenes", []):
+        content = scene.get("content", "")
+        if not content:
+            continue
+        sents = re.split(r"(?<=[。！？!?])", content)
+        for s in sents[:2]:
+            s = s.strip()
+            if 8 <= len(s) <= 60:
+                forbidden_lines.append(s)
+        if len(forbidden_lines) >= 8:
+            break
+
+    def _build_prompts(retry: bool) -> tuple[str, str]:
+        anti_copy = ""
+        if retry:
+            anti_copy = (
+                "\n【上一次 LLM 复读了原文,本次必须大幅改写】"
+                "\n  - 每段开头第一句必须不同于上一版;"
+                "\n  - 段落数量±2 段也接受,鼓励合并/拆分;"
+                "\n  - 至少 50% 段落的句序要重排或新写;"
+                "\n  - 下方 forbiddenLines 列出的原句一字不可出现;"
+            )
+        system = (
+            "你是中文网文连载写手,文风以七猫/起点/番茄爆款为标尺。当前任务是【按总编批注重写本章】。"
+            "只输出 JSON,不要 Markdown。"
+            "严格遵循总编批注 editorNotes,针对问题点逐一修正,但保留剧情走向和场景结构。"
+            "\n【字数】每场景 targetWords 指不含标点中文字数,全章 2000-2500 字,严禁低于 2000 或高于 2500。"
+            "\n【去 AI 味结构红线】(必须满足,违反等于本次重写失败):"
+            "\n  1. 末场景结尾必须有钩子:疑问/惊叹/省略号或'竟然/不料/突然/猛地'转折词;"
+            "\n  2. 单句成段率 ≤ 65%:相邻短句要合并;"
+            "\n  3. 含引号对话段比例 ≥ 30%:加入直接对白;"
+            "\n  4. 平均句长 16-25 字。"
+            "\n【AI 雷区词禁用】然而/与此同时/在这一刻/令人/不由得/不禁/深深地/油然而生/心头一震/宛若/正如 等,"
+            "出现即必须改写。"
+            "\n【升华句式禁用】不要'并非...而是'/'不仅...更...'/'宛若...一般'。"
+            "\n请对照上一版的实测 prevDeAiMetrics,把没达标的指标拉回来。"
+            + anti_copy
+        )
+        user = json.dumps({
+            "isRewrite": True,
+            "editorNotes": notes,
+            "prevDeAiMetrics": prev_de_ai,
+            "deAiTargets": {
+                "single_sent_para_ratio_max": 0.65,
+                "dialog_para_ratio_min": 0.30,
+                "sent_avg_min": 16,
+                "sent_avg_max": 25,
+                "ai_blacklist_max": 1,
+                "sublimation_max": 1,
+                "chapter_hook_required": True,
+            },
+            "forbiddenLines": forbidden_lines if retry else [],
+            "project": state["project"],
+            "plan": state["plan"],
+            "character": state["characters"]["suHan"],
+            "memory": state["memory"],
+            "hooks": state["hooks"],
+            "scenes": [
+                {
+                    "id": scene["id"],
+                    "title": scene["title"],
+                    "type": scene["type"],
+                    "summary": scene["summary"],
+                    "previousContent": scene.get("content", ""),
+                    "targetWords": min(max(scene.get("words", 700), 400), 1100),
+                }
+                for scene in state["scenes"]
+            ],
+            "required_schema": {
+                "scenes": [{"id": "scene_01", "content": "string"}]
+            },
+        }, ensure_ascii=False)
+        return system, user
+
+    def _try_once(temperature: float, retry: bool) -> tuple[dict | None, str]:
+        system, user = _build_prompts(retry=retry)
+        try:
+            data = chat_json(system, user, temperature=temperature, timeout=120, agent="scene_writer")
+            return data, ""
+        except Exception as exc:  # noqa: BLE001
+            return None, str(exc)
+
+    def _similarity(new_text: str) -> float:
+        if new_text and prev_text:
+            return difflib.SequenceMatcher(None, prev_text, new_text).ratio()
+        return 0.0
+
+    SPIN_THRESHOLD = 0.78
+
+    # 第一次尝试
+    data, err = _try_once(temperature=0.7, retry=False)
+    if data is None:
         _log_agent(state, "scene_writer", "failed", chapter=chapter_number,
-                   message=f"重写失败:{exc}")
-        return False, f"重写失败:{exc}"
+                   message=f"重写失败:{err}")
+        return False, f"重写失败:{err}"
     returned = data.get("scenes") or []
     by_id = {item.get("id"): item for item in returned if isinstance(item, dict)}
-    # 空转检测:先用返回内容拼出新正文与旧正文做相似度比较, 防 LLM 复读原文
     new_parts = []
     for scene in state["scenes"]:
         item = by_id.get(scene["id"])
@@ -2074,14 +2119,44 @@ def rewrite_scenes_with_editor_notes(state: dict[str, Any], notes: str) -> tuple
         else:
             new_parts.append(scene.get("content", ""))
     new_text = "\n\n".join(p for p in new_parts if p)
-    if new_text and prev_text:
-        similarity = difflib.SequenceMatcher(None, prev_text, new_text).ratio()
-    else:
-        similarity = 0.0
-    if similarity > 0.85:
-        _log_agent(state, "scene_writer", "failed", chapter=chapter_number,
-                   message=f"重写空转(相似度 {similarity:.0%}),LLM 复读原文")
-        return False, f"重写空转(新旧相似度 {similarity:.0%}),LLM 几乎没改"
+    similarity = _similarity(new_text)
+    retried = False
+
+    if similarity > SPIN_THRESHOLD:
+        # 复读了 — 高温 + 反复读 prompt + 禁用原句 再试一次
+        retried = True
+        _log_agent(state, "scene_writer", "revising", chapter=chapter_number,
+                   message=f"首轮重写复读(相似度 {similarity:.0%}),温度拉到 0.95 重试")
+        data2, err2 = _try_once(temperature=0.95, retry=True)
+        if data2 is None:
+            _log_agent(state, "scene_writer", "failed", chapter=chapter_number,
+                       message=f"反复读重试失败:{err2}")
+            return False, f"重写空转后反复读重试失败:{err2}"
+        returned2 = data2.get("scenes") or []
+        by_id2 = {item.get("id"): item for item in returned2 if isinstance(item, dict)}
+        new_parts2 = []
+        for scene in state["scenes"]:
+            item = by_id2.get(scene["id"])
+            if item and item.get("content"):
+                new_parts2.append(str(item["content"]).strip())
+            else:
+                new_parts2.append(scene.get("content", ""))
+        new_text2 = "\n\n".join(p for p in new_parts2 if p)
+        similarity2 = _similarity(new_text2)
+        _log_auto_fix(state, "anti_copy_retry", {
+            "first_similarity": round(similarity, 3),
+            "retry_similarity": round(similarity2, 3),
+            "threshold": SPIN_THRESHOLD,
+            "ok": similarity2 <= SPIN_THRESHOLD,
+        })
+        if similarity2 > SPIN_THRESHOLD:
+            _log_agent(state, "scene_writer", "failed", chapter=chapter_number,
+                       message=f"反复读重试后仍复读(相似度 {similarity2:.0%}),LLM 拒绝改写")
+            return False, f"重写两次都复读(首 {similarity:.0%}→retry {similarity2:.0%}),建议换模型"
+        # 第二次过关,用第二次的结果
+        by_id = by_id2
+        similarity = similarity2
+
     updated = 0
     for scene in state["scenes"]:
         item = by_id.get(scene["id"])
@@ -2093,7 +2168,8 @@ def rewrite_scenes_with_editor_notes(state: dict[str, Any], notes: str) -> tuple
         updated += 1
     if updated == 0:
         return False, "模型未返回可用重写内容"
-    return True, f"按批注重写 {updated} 个场景 (相似度 {similarity:.0%})"
+    suffix = " · 反复读重试成功" if retried else ""
+    return True, f"按批注重写 {updated} 个场景 (相似度 {similarity:.0%}){suffix}"
 
 
 def archive_current_chapter(state: dict[str, Any]) -> None:
@@ -3216,18 +3292,33 @@ def apply_editor_patches(state: dict[str, Any], patches: list[dict]) -> tuple[bo
             for i in sorted(ctx_indices)
         ]
 
-        system = (
-            "你是中文网文写手。任务是【按总编 patch 修复指定段落】。"
-            "只改 is_target=true 的段落,is_target=false 的段落是给你看上下文。"
-            "每个 patch 只动那一段,字数与原段 ±30%,保留剧情和人物关系。"
-            "\n【去 AI 味红线 - 违反 = 该 patch 视为失败】:"
-            "\n  - 禁用词:不禁/不由得/深深地/然而/与此同时/在这一刻/令人/宛若/正如/"
-            "心头一震/油然而生/随即/顿时/瞬间/一时间;"
-            "\n  - 禁用句式:并非...而是/不仅...更/宛若...一般/与其说...不如说;"
-            "\n  - 是末段必含钩子:?! 或'竟然/不料/突然/猛地'等;"
-            "\n  - 不要每句一段,短句要并;不要堆形容词;尽量用具体动作和对白。"
-            "\n只输出 JSON: {\"patches\":[{\"patch_id\":string,\"new_paragraph\":string}]}。"
-        )
+        def _call_patches(temperature: float, anti_copy: bool) -> dict | None:
+            sys_prompt = (
+                "你是中文网文写手。任务是【按总编 patch 修复指定段落】。"
+                "只改 is_target=true 的段落,is_target=false 的段落是给你看上下文。"
+                "每个 patch 只动那一段,字数与原段 ±30%,保留剧情和人物关系。"
+                "\n【去 AI 味红线 - 违反 = 该 patch 视为失败】:"
+                "\n  - 禁用词:不禁/不由得/深深地/然而/与此同时/在这一刻/令人/宛若/正如/"
+                "心头一震/油然而生/随即/顿时/瞬间/一时间;"
+                "\n  - 禁用句式:并非...而是/不仅...更/宛若...一般/与其说...不如说;"
+                "\n  - 是末段必含钩子:?! 或'竟然/不料/突然/猛地'等;"
+                "\n  - 不要每句一段,短句要并;不要堆形容词;尽量用具体动作和对白。"
+            )
+            if anti_copy:
+                sys_prompt += (
+                    "\n【上一轮你复读了原段,本次必须大幅改写】"
+                    "\n  - 新段首句必须与 original 首句不同;"
+                    "\n  - 至少 60% 字符要重新写,不能照搬;"
+                    "\n  - 句序、动作、人物视角任选一个维度做改变。"
+                )
+            sys_prompt += "\n只输出 JSON: {\"patches\":[{\"patch_id\":string,\"new_paragraph\":string}]}。"
+            try:
+                return chat_json(sys_prompt, user, temperature=temperature, timeout=60, agent="scene_writer")
+            except Exception as exc:  # noqa: BLE001
+                _log_agent(state, "scene_writer", "failed", chapter=chapter_number,
+                           message=f"patch {scene['id']}: {str(exc)[:80]}")
+                return None
+
         user = json.dumps({
             "scene_id": scene["id"],
             "scene_summary": scene.get("summary", ""),
@@ -3244,33 +3335,57 @@ def apply_editor_patches(state: dict[str, Any], patches: list[dict]) -> tuple[bo
                 for t in targets
             ],
         }, ensure_ascii=False)
-        try:
-            data = chat_json(system, user, temperature=0.6, timeout=60, agent="scene_writer")
-        except Exception as exc:  # noqa: BLE001
-            _log_agent(state, "scene_writer", "failed", chapter=chapter_number,
-                       message=f"patch {scene['id']}: {str(exc)[:80]}")
+        data = _call_patches(temperature=0.6, anti_copy=False)
+        if data is None:
             continue
 
-        returned = data.get("patches") or []
-        by_pid: dict[str, str] = {}
-        for p in returned:
-            if isinstance(p, dict) and p.get("patch_id"):
-                by_pid[p["patch_id"]] = (p.get("new_paragraph") or "").strip()
+        SPIN_THRESHOLD = 0.80  # 段级阈值,比章级松一点(段太短 minor 改动会很相似)
 
-        new_paragraphs = list(paragraphs)
-        scene_applied = 0
-        for t in targets:
-            new_text = by_pid.get(t["patch_id"], "")
-            if not new_text:
-                continue
-            # 空转检测:相似度 > 90% 视为复读
-            similarity = difflib.SequenceMatcher(None, t["original"], new_text).ratio()
-            if similarity > 0.90:
-                spin_count += 1
-                continue
-            new_paragraphs[t["paragraph_idx"]] = new_text
-            scene_applied += 1
+        def _process(payload: dict) -> tuple[int, int, list[tuple[int, str]]]:
+            """返回 (scene_applied, spin, retry_targets[(idx, original)])"""
+            retry_list: list[tuple[int, str]] = []
+            local_applied = 0
+            local_spin = 0
+            local_new = list(paragraphs)
+            returned_p = payload.get("patches") or []
+            local_by_pid: dict[str, str] = {}
+            for p in returned_p:
+                if isinstance(p, dict) and p.get("patch_id"):
+                    local_by_pid[p["patch_id"]] = (p.get("new_paragraph") or "").strip()
+            for t in targets:
+                new_text = local_by_pid.get(t["patch_id"], "")
+                if not new_text:
+                    continue
+                similarity = difflib.SequenceMatcher(None, t["original"], new_text).ratio()
+                if similarity > SPIN_THRESHOLD:
+                    local_spin += 1
+                    retry_list.append((t["paragraph_idx"], t["patch_id"]))
+                    continue
+                local_new[t["paragraph_idx"]] = new_text
+                local_applied += 1
+            return local_applied, local_spin, retry_list, local_new
 
+        scene_applied, scene_spin, retry_list, new_paragraphs = _process(data)
+
+        # 全部段空转 → 高温反复读 retry 一次
+        if scene_applied == 0 and retry_list:
+            _log_agent(state, "scene_writer", "revising", chapter=chapter_number,
+                       message=f"patch 全空转({scene_spin} 段),scene {scene['id']} 高温重试")
+            data2 = _call_patches(temperature=0.95, anti_copy=True)
+            if data2 is not None:
+                a2, s2, _, np2 = _process(data2)
+                _log_auto_fix(state, "anti_copy_retry_patch", {
+                    "scene_id": scene["id"],
+                    "first_spin": scene_spin,
+                    "retry_applied": a2,
+                    "retry_spin": s2,
+                })
+                if a2 > 0:
+                    scene_applied = a2
+                    new_paragraphs = np2
+                    scene_spin = s2
+
+        spin_count += scene_spin
         if scene_applied > 0:
             scene["content"] = "\n\n".join(new_paragraphs)
             scene["words"] = len(scene["content"])
