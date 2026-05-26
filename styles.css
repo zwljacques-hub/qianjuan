@@ -1742,6 +1742,43 @@ button {
   line-height: 1.5;
 }
 
+.model-status-card .key-source {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  width: fit-content;
+}
+.model-status-card .key-source-own {
+  background: #d9efe8;
+  color: #1f6a5a;
+  border: 1px solid #2c8c7e;
+}
+.model-status-card .key-source-default {
+  background: #fff4d6;
+  color: #8a6a1f;
+  border: 1px solid #d49a3a;
+}
+.model-status-card .key-source-none {
+  background: #fbeae7;
+  color: #a02d20;
+  border: 1px solid #c0392b;
+}
+.model-status-card .key-source-hint {
+  font-size: 12px;
+  color: #6a7280;
+  font-style: italic;
+}
+.model-status-card code {
+  background: #f4f6f8;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: #2c3e50;
+}
+
 .agent-model-list {
   display: grid;
   gap: 10px;

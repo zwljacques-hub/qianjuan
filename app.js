@@ -1495,11 +1495,29 @@ function renderLLMConfig() {
   const testSelect = document.getElementById("testAgentRole");
   if (!status || !list || !testSelect) return;
   const config = llmConfig || llmStatus || {};
+  const usingOwn = Boolean(config.hasRuntimeApiKey);
+  const sourceLabel = usingOwn
+    ? '<span class="key-source key-source-own">✅ 正在使用你自己的 API Key</span>'
+    : (config.configured
+        ? '<span class="key-source key-source-default">🌐 正在使用服务器默认 Key(所有用户共享,可能限额)</span>'
+        : '<span class="key-source key-source-none">⚠️ 未配置任何 API Key,无法生成</span>');
   status.innerHTML = `
-    <strong>${config.configured ? "当前模型已可用" : "当前未配置 API Key"}</strong>
-    <span>默认地址：${escapeHtml(config.baseUrl || "未设置")} · 默认模型：${escapeHtml(config.model || "未设置")}</span>
-    <span>说明：网页保存的 API Key 只在当前后端进程内生效，重启后需重新填写。</span>
+    <strong>${config.configured ? "当前模型可用" : "当前未配置 API Key"}</strong>
+    ${sourceLabel}
+    <span>实际生效地址：<code>${escapeHtml(config.baseUrl || "未设置")}</code></span>
+    <span>实际生效模型：<code>${escapeHtml(config.model || "未设置")}</code></span>
+    <span class="key-source-hint">提示:配自己的 Key 时必须同时填 BaseUrl(API 地址)和 Model(模型名),否则会被打到服务器默认中转上,直接 401。</span>
   `;
+  // 把全局三个输入框的占位符同步成真实生效值,避免硬编码 "gpt-5.5 / openai.com" 误导用户
+  const form = document.getElementById("llmConfigForm");
+  if (form) {
+    const baseUrlInput = form.querySelector('input[name="baseUrl"]');
+    const modelInput = form.querySelector('input[name="model"]');
+    const apiKeyInput = form.querySelector('input[name="apiKey"]');
+    if (baseUrlInput) baseUrlInput.placeholder = `当前: ${config.baseUrl || "未设置"}`;
+    if (modelInput) modelInput.placeholder = `当前: ${config.model || "未设置"}`;
+    if (apiKeyInput) apiKeyInput.placeholder = usingOwn ? "已设置你自己的 Key,留空不变" : "填入即覆盖服务器默认 Key";
+  }
   const agents = config.agents || [];
   testSelect.innerHTML = ['<option value="">默认模型</option>']
     .concat(agents.map((agent) => `<option value="${agent.id}">${escapeHtml(agent.label)} · ${escapeHtml(agent.model || "默认")}</option>`))

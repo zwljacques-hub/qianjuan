@@ -233,10 +233,16 @@ def update_runtime_llm_config(config: dict[str, Any]) -> None:
     # 验收:用户自定义 apiKey 时必须有 model,否则会用服务器默认 model 名导致 404
     if g.get("apiKey") and not g.get("model"):
         raise RuntimeError("配了自定义 API Key 就必须填全局模型名(例如 deepseek-chat / gpt-4o-mini / claude-3-5-sonnet-latest),否则会用错模型导致生成失败。")
+    # 验收:用户自定义 apiKey 时必须有 baseUrl,否则会打到服务器默认中转地址 → 401
+    if g.get("apiKey") and not g.get("baseUrl"):
+        raise RuntimeError("配了自定义 API Key 就必须填全局调用地址(BaseUrl,例如 https://api.openai.com/v1 / https://api.deepseek.com/v1 / https://api.moonshot.cn/v1),否则你的 Key 会被打到服务器默认的中转地址上,直接 401。")
     for role_id, current in user_agents.items():
         if current.get("apiKey") and not current.get("model") and not g.get("model"):
             role_label = next((r["label"] for r in AGENT_ROLES if r["id"] == role_id), role_id)
             raise RuntimeError(f"{role_label} 配了独立 API Key,但没填模型名,且全局也没配模型名。请至少填一个。")
+        if current.get("apiKey") and not current.get("baseUrl") and not g.get("baseUrl"):
+            role_label = next((r["label"] for r in AGENT_ROLES if r["id"] == role_id), role_id)
+            raise RuntimeError(f"{role_label} 配了独立 API Key,但没填调用地址,且全局也没配调用地址。请至少填一个 BaseUrl,否则会被打到服务器默认中转。")
 
     _save_user_config(_current_uid())
 
@@ -298,18 +304,18 @@ def chat_json(system: str, user: str, *, temperature: float = 0.4, timeout: int 
     }
 
     try:
-        data = _post_chat_completion(config, payload, timeout)
+        data = _post_chat_completion(config, payload, timeout, agent=agent)
     except RuntimeError as error:
         if "response_format" not in str(error):
             raise
         payload.pop("response_format", None)
-        data = _post_chat_completion(config, payload, timeout)
+        data = _post_chat_completion(config, payload, timeout, agent=agent)
 
     content = data["choices"][0]["message"]["content"]
     return _parse_json_content(content)
 
 
-def _post_chat_completion(config: LLMConfig, payload: dict[str, Any], timeout: int) -> dict[str, Any]:
+def _post_chat_completion(config: LLMConfig, payload: dict[str, Any], timeout: int, *, agent: str | None = None) -> dict[str, Any]:
     request = urllib.request.Request(
         f"{config.base_url}/chat/completions",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -319,14 +325,18 @@ def _post_chat_completion(config: LLMConfig, payload: dict[str, Any], timeout: i
         },
         method="POST",
     )
+    ctx = f"[baseUrl={config.base_url} | model={config.model}" + (f" | agent={agent}" if agent else "") + "]"
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"LLM HTTP {error.code}: {detail}") from error
+        # 截断 detail 避免过长把 toast 撑爆
+        if len(detail) > 400:
+            detail = detail[:400] + "..."
+        raise RuntimeError(f"LLM HTTP {error.code} {ctx}: {detail}") from error
     except urllib.error.URLError as error:
-        raise RuntimeError(f"LLM request failed: {error}") from error
+        raise RuntimeError(f"LLM request failed {ctx}: {error}") from error
 
 
 def _parse_json_content(content: str) -> dict[str, Any]:
